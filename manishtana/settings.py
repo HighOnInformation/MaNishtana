@@ -85,6 +85,7 @@ _PLACEHOLDERS = {
     "file_user": ({"path", "diff", "context"}, {"diff"}),
     "part_user": ({"path", "diff", "context", "part", "parts"}, {"diff"}),
     "context_block": ({"brief"}, {"brief"}),
+    "intent_block": ({"intent"}, {"intent"}),
     "summary_system": (set(), set()),
     "summary_user": ({"manifest", "analyses"}, {"analyses"}),
     "summary_item": ({"path", "analysis"}, {"analysis"}),
@@ -97,6 +98,14 @@ _DEFAULT_PROMPTS = {
     "file_user": "{context}File: {path}\n\n```diff\n{diff}```",
     "part_user": "{context}File: {path}\nThis is part {part} of {parts} of the diff.\n\n```diff\n{diff}```",
     "context_block": "The change as a whole:\n{brief}\n\nYou are reviewing one file of it.\n\n",
+    # Phrased as a claim to check rather than as background. A model shown the
+    # author's description tends to restate it; the wording is what keeps the
+    # analysis answerable against the diff instead of against the message.
+    "intent_block": (
+        "The author describes the change as follows. Treat this as a claim to verify "
+        "against the code, not as established fact — say so if the diff does not "
+        "support it.\n\n{intent}\n\n"
+    ),
     "summary_system": _SUMMARY_SYSTEM,
     "summary_user": "{manifest}\n\n{analyses}",
     "summary_item": "## {path}\n{analysis}",

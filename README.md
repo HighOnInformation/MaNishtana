@@ -223,6 +223,38 @@ python3 -m manishtana DIR_A DIR_B -c config.json -o report.md -H report.html -j 
 | `-j`, `--json` | off | Also write JSON for automated consumers |
 | `--no-llm` | off | Skip model analysis; everything deterministic still runs |
 
+### Comparing two revisions of a git repository
+
+The two directories can come from a repository instead of a delivery. Both
+revisions are exported to a temporary pair of trees and the same comparison runs
+over them, so every rule, every output and every flag above behaves identically.
+
+```bash
+python3 -m manishtana --git /path/to/repo --commit HEAD -o report.md
+python3 -m manishtana --git /path/to/repo --from v2.06 --to v2.12 -o report.md
+python3 -m manishtana --git /path/to/repo --from origin/main            # --to defaults to HEAD
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-g`, `--git` | off | Compare two revisions of this repository. `DIR_A`/`DIR_B` are then omitted |
+| `--commit` | — | Review one commit: `REV^` to `REV`. Not combinable with `--from`/`--to` |
+| `--from` | — | The old revision |
+| `--to` | `HEAD` | The new revision |
+| `--intent-context` | off | Also give the commit messages to the model — see below |
+
+The export uses `git archive`, so nothing in your working tree is touched, no
+`.git` directory reaches the comparison, and a dirty checkout does not affect the
+result. A revision that does not resolve is an error before anything is exported.
+
+**The commit messages are read, and by default withheld from the model.** They
+appear in the report under *Stated intent*, beside an analysis written from the
+diff alone. That is the point: you can then ask whether the change does what its
+message claims, which is a question the report cannot answer if the message was
+what it was told. `--intent-context` supplies them as context instead, and the
+report then says so in place of the independence note — agreement with the
+message is not evidence when the model was shown the message.
+
 One line reaches stdout, on success only:
 
 ```
@@ -401,6 +433,9 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
   genuinely different files look identical, which is the worse failure.
 - **The cross-reference reads text, not C.** A name in a comment counts as a
   reference.
+- **In `--git` mode the report's "Directory A/B" rows name temporary paths** that
+  no longer exist once the run finishes. The revisions are on stdout and in the
+  *Stated intent* section; the header rows are not yet the place to look.
 - A failed model call does not stop the run — a warning goes to stderr and the
   report is produced without that analysis.
 - Skipped files are never compared, so the report cannot say what changed in them.

@@ -61,8 +61,16 @@ def http_chat(llm):
     return chat
 
 
-def analyze_changes(comparison, chat, prompts=None, xref=None, max_files=50, max_chars=24000):
-    """Orient, analyze every real change, then reconcile the results."""
+def analyze_changes(comparison, chat, prompts=None, xref=None, max_files=50, max_chars=24000,
+                    intent=None):
+    """Orient, analyze every real change, then reconcile the results.
+
+    `intent` is the author's own description of the change (commit messages, when
+    the input was a git range). It is off by default and travels no further than
+    the per-file context: a model given the author's account of what a change does
+    will reproduce it, and the report's value is that it was written from the diff
+    alone. When it is supplied, the prompt asks for it to be checked, not assumed.
+    """
     if prompts is None:
         prompts = _load_settings({}).prompts
 
@@ -83,6 +91,8 @@ def analyze_changes(comparison, chat, prompts=None, xref=None, max_files=50, max
             "orientation",
         )
     context = prompts["context_block"].format(brief=brief) if brief else ""
+    if intent:
+        context = prompts["intent_block"].format(intent=intent) + context
 
     analyses = {}
     for rel in targets:

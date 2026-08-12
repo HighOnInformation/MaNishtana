@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.compare import Comparison, _noise
 from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
+from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
 from manishtana.llm import _manifest, analyze_changes
 from manishtana.output import (
     _extract_risk,
@@ -965,6 +966,133 @@ class BuildHtml(unittest.TestCase):
         html = build_html("src/v1", "src/v2", comparison(), {}, None)
         self.assertIn("src/v1", html)
         self.assertIn("src/v2", html)
+
+
+# --- gitrepo -----------------------------------------------------------------
+# No git is run here: the parsing of what git prints is the part with edge cases,
+# and it is a pure function of a string.
+
+
+def _record(sha, author, date, subject, body):
+    return "\x1f".join([sha, author, date, subject, body]) + "\x1e"
+
+
+class ParseLog(unittest.TestCase):
+    def test_single_commit(self):
+        text = _record("abc123", "Ada", "2026-01-02T03:04:05+00:00", "Fix the thing", "Why.\n")
+        items = _parse_log(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].sha, "abc123")
+        self.assertEqual(items[0].author, "Ada")
+        self.assertEqual(items[0].subject, "Fix the thing")
+        self.assertEqual(items[0].body, "Why.")
+
+    def test_body_spanning_blank_lines_stays_one_commit(self):
+        # A line-oriented parse would split this into several commits.
+        body = "First paragraph.\n\nSecond paragraph.\n\nSigned-off-by: Ada <a@b>\n"
+        items = _parse_log(_record("abc", "Ada", "d", "Subject", body))
+        self.assertEqual(len(items), 1)
+        self.assertIn("Second paragraph.", items[0].body)
+        self.assertIn("Signed-off-by", items[0].body)
+
+    def test_several_commits_keep_their_order(self):
+        text = (
+            _record("aaa", "Ada", "d", "First", "")
+            + _record("bbb", "Bo", "d", "Second", "body")
+        )
+        self.assertEqual([item.sha for item in _parse_log(text)], ["aaa", "bbb"])
+
+    def test_empty_and_malformed_records_are_dropped(self):
+        text = "\x1e\x1e" + "not\x1fenough\x1ffields\x1e" + _record("ccc", "C", "d", "S", "")
+        self.assertEqual([item.sha for item in _parse_log(text)], ["ccc"])
+
+    def test_subject_with_a_colon_and_unicode(self):
+        items = _parse_log(_record("d1", "Ægir", "d", "fs/ext2: hä", "ünicode body"))
+        self.assertEqual(items[0].subject, "fs/ext2: hä")
+        self.assertEqual(items[0].author, "Ægir")
+
+
+class IntentText(unittest.TestCase):
+    def test_no_commits_is_empty(self):
+        self.assertEqual(intent_text([]), "")
+
+    def test_subject_and_body_both_appear(self):
+        item = Commit("abcdef1234", "Ada", "d", "Bound the parser", "It could overflow.")
+        text = intent_text([item])
+        self.assertIn("abcdef123", text)
+        self.assertIn("Bound the parser", text)
+        self.assertIn("It could overflow.", text)
+        self.assertIn("Ada", text)
+
+
+class IsWithin(unittest.TestCase):
+    """The export unpacks an archive built from a repository the reviewer did not write."""
+
+    def test_child_is_within(self):
+        self.assertTrue(_is_within(os.sep + "base", os.path.join(os.sep + "base", "a", "b.c")))
+
+    def test_escape_is_rejected(self):
+        self.assertFalse(_is_within(os.sep + "base", os.path.join(os.sep + "base", "..", "x")))
+
+    def test_sibling_prefix_is_rejected(self):
+        # "/base-other" starts with "/base" as a string but is not inside it.
+        self.assertFalse(_is_within(os.sep + "base", os.sep + "base-other"))
+
+
+class IntentInAnalysis(unittest.TestCase):
+    """Independence is the default; the author's account travels only when asked."""
+
+    def test_intent_is_absent_unless_supplied(self):
+        chat = FakeChat()
+        analyze_changes(comparison(), chat, xref=None)
+        self.assertNotIn("claim to verify", chat.calls[0]["user"])
+
+    def test_intent_reaches_the_per_file_call(self):
+        chat = FakeChat()
+        analyze_changes(comparison(), chat, xref=None, intent="Bound the parser.")
+        self.assertIn("Bound the parser.", chat.calls[0]["user"])
+        self.assertIn("claim to verify", chat.calls[0]["user"])
+
+
+class CommitsInOutput(unittest.TestCase):
+    def setUp(self):
+        self.commits = [Commit("abcdef1234", "Ada", "d", "Bound the parser", "It could overflow.")]
+
+    def test_report_records_the_stated_intent(self):
+        text = build_report("v1", "v2", comparison(), {}, None, commits=self.commits)
+        self.assertIn("Stated intent", text)
+        self.assertIn("Bound the parser", text)
+        self.assertIn("It could overflow.", text)
+
+    def test_report_says_whether_the_model_saw_it(self):
+        withheld = build_report("v1", "v2", comparison(), {}, None, commits=self.commits)
+        self.assertIn("*not* shown to the model", withheld)
+        shown = build_report(
+            "v1", "v2", comparison(), {}, None, commits=self.commits, intent_shown=True
+        )
+        self.assertIn("**was** supplied to the model", shown)
+        self.assertNotIn("*not* shown to the model", shown)
+
+    def test_no_intent_section_without_commits(self):
+        self.assertNotIn("Stated intent", build_report("v1", "v2", comparison(), {}, None))
+
+    def test_html_carries_the_same_distinction(self):
+        html = build_html("v1", "v2", comparison(), {}, None, commits=self.commits)
+        self.assertIn("Stated intent", html)
+        self.assertIn("Bound the parser", html)
+
+    def test_json_records_commits_and_whether_they_were_shown(self):
+        payload = build_json(
+            "v1", "v2", comparison(), {}, None, commits=self.commits, intent_shown=True
+        )
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["commits"][0]["sha"], "abcdef1234")
+        self.assertTrue(payload["inputs"]["intent_shown"])
+
+    def test_json_defaults_to_independent(self):
+        payload = build_json("v1", "v2", comparison(), {}, None)
+        self.assertEqual(payload["commits"], [])
+        self.assertFalse(payload["inputs"]["intent_shown"])
 
 
 if __name__ == "__main__":

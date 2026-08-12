@@ -34,6 +34,19 @@ _RISK_RE = re.compile(r"\b(low|medium|high)\b")
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+# Which of these two the report prints is the difference between an independent
+# reading and a restatement, so it is never inferred — the caller says which.
+_INTENT_NOTE_WITHHELD = (
+    "What the author said this change does. Recorded from the commit messages and "
+    "*not* shown to the model — the analysis below was written from the diff alone, "
+    "so the two can be compared.\n"
+)
+_INTENT_NOTE_SHOWN = (
+    "What the author said this change does. This text **was** supplied to the model "
+    "as context, so the analysis below is not an independent reading of the diff and "
+    "agreement with it is not evidence.\n"
+)
+
 # One aligned line of a two-pane comparison. A None number means that side has
 # no line here — the blank half of an insertion or a deletion.
 Row = collections.namedtuple("Row", "kind left_no left right_no right")
@@ -180,7 +193,7 @@ def _labels(risk):
 
 
 def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None,
-               risk=None, settings=None):
+               risk=None, settings=None, commits=None, intent_shown=False):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
     file_label, summary_label = _labels(risk)
     files = []
@@ -197,7 +210,9 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
             }
         )
     return {
-        "schema_version": 1,
+        # 2: added "commits" — the stated intent that came with a git range — and
+        # "inputs.intent_shown", which says whether the model was allowed to see it.
+        "schema_version": 2,
         "generated_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "dir_a": dir_a,
         "dir_b": dir_b,
@@ -210,14 +225,19 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
         "brief": brief,
         "summary": {"text": summary, "risk": _extract_risk(summary, summary_label)},
         "cross_reference": dict(zip(("removed", "dangling"), _xref_parts(xref))),
-        "inputs": {"prompts_sha256": settings.digest if settings else None},
+        "inputs": {
+            "prompts_sha256": settings.digest if settings else None,
+            "intent_shown": bool(intent_shown),
+        },
+        "commits": [dict(item._asdict()) for item in (commits or [])],
         "real": files,
         "noise": sorted(comparison.noise),
         "skipped": sorted(comparison.skipped),
     }
 
 
-def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None):
+def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
+                 commits=None, intent_shown=False):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -233,7 +253,28 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
     out.append("| Real changes | %d |" % len(real))
     out.append("| Noise only | %d |" % len(noise))
     out.append("| Skipped | %d |" % len(skipped))
+    if commits:
+        out.append("| Commits | %d |" % len(commits))
     out.append("")
+
+    if commits:
+        out.append("## Stated intent\n")
+        out.append(_INTENT_NOTE_SHOWN if intent_shown else _INTENT_NOTE_WITHHELD)
+        out.append("| Commit | Subject | Author |")
+        out.append("|---|---|---|")
+        for item in commits:
+            out.append(
+                "| `%s` | %s | %s |" % (item.sha[:9], item.subject or "—", item.author or "—")
+            )
+        out.append("")
+        for item in commits:
+            if not item.body:
+                continue
+            out.append("<details><summary>%s — full message</summary>\n" % item.sha[:9])
+            out.append("```")
+            out.append(item.body.rstrip("\n"))
+            out.append("```\n")
+            out.append("</details>\n")
 
     if brief:
         out.append("## The change as a whole\n")
@@ -294,7 +335,8 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
     return "\n".join(out)
 
 
-def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None):
+def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
+               commits=None, intent_shown=False):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -330,6 +372,29 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
             % (kind, count, count, label)
         )
     out.append("</div>")
+
+    if commits:
+        out.append('<section id="intent"><h2>Stated intent</h2>')
+        out.append('<div class="panel prose">')
+        out.append("<p>%s</p>" % _inline(
+            _INTENT_NOTE_SHOWN if intent_shown else _INTENT_NOTE_WITHHELD
+        ).strip())
+        out.append("<table><thead><tr><th>Commit</th><th>Subject</th><th>Author</th>"
+                   "</tr></thead><tbody>")
+        for item in commits:
+            out.append(
+                "<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>"
+                % (escape(item.sha[:9]), escape(item.subject or "—"), escape(item.author or "—"))
+            )
+        out.append("</tbody></table>")
+        for item in commits:
+            if not item.body:
+                continue
+            out.append(
+                "<details><summary>%s — full message</summary><pre>%s</pre></details>"
+                % (escape(item.sha[:9]), escape(item.body.rstrip("\n")))
+            )
+        out.append("</div></section>")
 
     if brief:
         out.append('<section id="brief"><h2>The change as a whole</h2>')
