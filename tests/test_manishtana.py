@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.compare import Comparison, _noise
 from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
-from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
+from manishtana.gitrepo import Commit, Source, _is_within, _parse_log, intent_text
 from manishtana.llm import _manifest, analyze_changes
 from manishtana.output import (
     _extract_risk,
@@ -1085,7 +1085,7 @@ class CommitsInOutput(unittest.TestCase):
         payload = build_json(
             "v1", "v2", comparison(), {}, None, commits=self.commits, intent_shown=True
         )
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["commits"][0]["sha"], "abcdef1234")
         self.assertTrue(payload["inputs"]["intent_shown"])
 
@@ -1093,6 +1093,75 @@ class CommitsInOutput(unittest.TestCase):
         payload = build_json("v1", "v2", comparison(), {}, None)
         self.assertEqual(payload["commits"], [])
         self.assertFalse(payload["inputs"]["intent_shown"])
+
+
+class SourceInOutput(unittest.TestCase):
+    """In --git mode the exported trees are gone by the time anyone reads the report."""
+
+    def setUp(self):
+        self.source = Source(
+            repo="/srv/fw",
+            rev_a="v1.2", sha_a="a" * 40,
+            rev_b="HEAD", sha_b="b" * 40,
+            command="python -m manishtana --git /srv/fw --from %s --to %s" % ("a" * 40, "b" * 40),
+        )
+
+    def test_report_names_the_revisions_not_the_temp_trees(self):
+        md = build_report("/tmp/x/before", "/tmp/x/after", comparison(), {}, None,
+                          source=self.source)
+        self.assertIn("# Revision comparison report", md)
+        self.assertIn("/srv/fw", md)
+        self.assertIn("a" * 40, md)
+        self.assertIn("v1.2", md)
+        self.assertNotIn("/tmp/x/before", md)
+        self.assertNotIn("Directory A", md)
+
+    def test_report_carries_a_command_that_reproduces_it(self):
+        md = build_report("/tmp/x/before", "/tmp/x/after", comparison(), {}, None,
+                          source=self.source)
+        self.assertIn("| Reproduce | `%s` |" % self.source.command, md)
+
+    def test_directory_mode_header_is_unchanged(self):
+        md = build_report("v1", "v2", comparison(), {}, None)
+        self.assertIn("# Directory comparison report", md)
+        self.assertIn("| Directory A | `v1` |", md)
+        self.assertNotIn("Reproduce", md)
+
+    def test_html_title_and_header_name_the_revisions(self):
+        html = build_html("/tmp/x/before", "/tmp/x/after", comparison(), {}, None,
+                          source=self.source)
+        self.assertIn("<title>Revision comparison — aaaaaaaaa..bbbbbbbbb</title>", html)
+        self.assertIn("<dt>Repository</dt><dd>/srv/fw</dd>", html)
+        self.assertNotIn("/tmp/x/before", html)
+
+    def test_html_directory_mode_header_is_unchanged(self):
+        html = build_html("v1", "v2", comparison(), {}, None)
+        self.assertIn("<title>Directory comparison — v1 / v2</title>", html)
+        self.assertIn("<dt>Directory A</dt><dd>v1</dd>", html)
+
+    def test_side_by_side_panes_are_labelled_by_revision(self):
+        html = build_html("/tmp/x/before", "/tmp/x/after", comparison(), {}, None,
+                          source=self.source)
+        self.assertIn('<th colspan="2">aaaaaaaaa</th>', html)
+        self.assertNotIn("/tmp/x/before", html)
+
+    def test_json_records_the_revisions(self):
+        payload = build_json("/tmp/x/before", "/tmp/x/after", comparison(), {}, None,
+                             source=self.source)
+        self.assertEqual(payload["source"]["kind"], "git")
+        self.assertEqual(payload["source"]["from"], {"rev": "v1.2", "sha": "a" * 40})
+        self.assertEqual(payload["source"]["repo"], "/srv/fw")
+
+    def test_json_directory_mode_still_says_what_it_compared(self):
+        payload = build_json("v1", "v2", comparison(), {}, None)
+        self.assertEqual(
+            payload["source"], {"kind": "directories", "dir_a": "v1", "dir_b": "v2"}
+        )
+
+    def test_a_sha_given_verbatim_is_not_printed_twice(self):
+        source = self.source._replace(rev_a="a" * 40)
+        md = build_report("x", "y", comparison(), {}, None, source=source)
+        self.assertIn("| From | `%s` |" % ("a" * 40), md)
 
 
 if __name__ == "__main__":

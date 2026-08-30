@@ -2,6 +2,7 @@
 
 Public interface:
     Commit                                   namedtuple(sha, author, date, subject, body)
+    Source                                   namedtuple(repo, rev_a, sha_a, rev_b, sha_b, command)
     resolve(repo, rev) -> sha                 full sha, or None when rev does not exist
     export(repo, rev, dest)                   write that revision's tree into dest
     commits(repo, rev_a, rev_b) -> [Commit]   oldest first, exclusive of rev_a
@@ -36,6 +37,14 @@ import tempfile
 from .common import warn
 
 Commit = collections.namedtuple("Commit", "sha author date subject body")
+
+# What the comparison was actually of, for a report that must be able to say so
+# after the exported trees are gone. Both the symbolic revision and the resolved
+# sha are carried: the symbolic one is what the reviewer typed and recognizes,
+# the sha is what it meant and is the only half that stays true as branches move.
+# `command` is filled by `cli` — it is the caller that knows how it was invoked —
+# and re-running it must reproduce this report, so it names shas, not symbols.
+Source = collections.namedtuple("Source", "repo rev_a sha_a rev_b sha_b command")
 
 # Field and record separators that cannot occur in a commit message: git's own
 # --format placeholders emit them literally, and no editor writes them.

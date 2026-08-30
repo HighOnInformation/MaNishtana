@@ -192,8 +192,70 @@ def _labels(risk):
     return risk.get("file_label", "Risk"), risk.get("summary_label", "Overall risk")
 
 
+def _subject_title(source):
+    """What this report is a report of. In git mode it is not a directory."""
+    return "Revision comparison" if source else "Directory comparison"
+
+
+def _subject_line(source, dir_a, dir_b):
+    """The one-line identity of the comparison, for a title bar."""
+    if source:
+        return "%s..%s" % (source.sha_a[:9], source.sha_b[:9])
+    return "%s / %s" % (dir_a, dir_b)
+
+
+def _subject_rows(source, dir_a, dir_b):
+    """Header rows identifying what was compared, as plain (label, value) pairs.
+
+    In git mode dir_a and dir_b are temporary export directories that the run
+    deletes before anyone opens the report, so naming them is worse than naming
+    nothing: the header points at paths that provably no longer exist. The
+    revisions are both what was compared and what the reader can go back to.
+
+    Both halves of each revision are printed. The sha is the authoritative one —
+    a branch name resolves differently tomorrow — but the symbolic name is what
+    the reviewer typed, and a header they cannot recognize is one they distrust.
+    """
+    if not source:
+        return [("Directory A", dir_a), ("Directory B", dir_b)]
+    rows = [("Repository", source.repo)]
+    for label, rev, sha in (
+        ("From", source.rev_a, source.sha_a),
+        ("To", source.rev_b, source.sha_b),
+    ):
+        rows.append((label, "%s (%s)" % (sha, rev) if rev and rev != sha else sha))
+    if source.command:
+        rows.append(("Reproduce", source.command))
+    return rows
+
+
+def _pane_labels(source, dir_a, dir_b):
+    """Column headers for the two side-by-side panes.
+
+    The same defect as the header rows, one level down: labelling the panes with
+    the temporary export directories tells the reader nothing and outlives the
+    directories themselves. Short shas fit the narrow column and still identify.
+    """
+    if not source:
+        return dir_a, dir_b
+    return source.sha_a[:9], source.sha_b[:9]
+
+
+def _source_json(source, dir_a, dir_b):
+    """What was compared, for a consumer that never sees the header."""
+    if not source:
+        return {"kind": "directories", "dir_a": dir_a, "dir_b": dir_b}
+    return {
+        "kind": "git",
+        "repo": source.repo,
+        "from": {"rev": source.rev_a, "sha": source.sha_a},
+        "to": {"rev": source.rev_b, "sha": source.sha_b},
+        "command": source.command,
+    }
+
+
 def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None,
-               risk=None, settings=None, commits=None, intent_shown=False):
+               risk=None, settings=None, commits=None, intent_shown=False, source=None):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
     file_label, summary_label = _labels(risk)
     files = []
@@ -212,10 +274,13 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     return {
         # 2: added "commits" — the stated intent that came with a git range — and
         # "inputs.intent_shown", which says whether the model was allowed to see it.
-        "schema_version": 2,
+        # 3: added "source". dir_a/dir_b stay for schema-2 consumers, but in git
+        # mode they name temporary exports; "source" is the half that stays true.
+        "schema_version": 3,
         "generated_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "dir_a": dir_a,
         "dir_b": dir_b,
+        "source": _source_json(source, dir_a, dir_b),
         "llm_ran": bool(analyses or summary),
         "counts": {
             "real": len(comparison.real),
@@ -237,18 +302,18 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
 
 
 def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
-                 commits=None, intent_shown=False):
+                 commits=None, intent_shown=False, source=None):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
     file_label, summary_label = _labels(risk)
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     out = []
-    out.append("# Directory comparison report\n")
+    out.append("# %s report\n" % _subject_title(source))
     out.append("| | |")
     out.append("|---|---|")
-    out.append("| Directory A | `%s` |" % dir_a)
-    out.append("| Directory B | `%s` |" % dir_b)
+    for label, value in _subject_rows(source, dir_a, dir_b):
+        out.append("| %s | `%s` |" % (label, value))
     out.append("| Date | %s |" % now)
     out.append("| Real changes | %d |" % len(real))
     out.append("| Noise only | %d |" % len(noise))
@@ -336,14 +401,16 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
 
 
 def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
-               commits=None, intent_shown=False):
+               commits=None, intent_shown=False, source=None):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
     file_label, summary_label = _labels(risk)
+    pane_a, pane_b = _pane_labels(source, dir_a, dir_b)
     out = ["<!doctype html>", '<html lang="en">', "<head>", '<meta charset="utf-8">']
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
-    out.append("<title>Directory comparison — %s / %s</title>" % (escape(dir_a), escape(dir_b)))
+    out.append("<title>%s — %s</title>"
+               % (_subject_title(source), escape(_subject_line(source, dir_a, dir_b))))
     out.append("<style>%s</style>" % _STYLE)
     out.append("</head>")
     out.append("<body>")
@@ -351,10 +418,10 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
 
     out.append("<header>")
     out.append('<p class="eyebrow">MaNishtana report</p>')
-    out.append("<h1>Directory comparison</h1>")
+    out.append("<h1>%s</h1>" % _subject_title(source))
     out.append('<dl class="meta">')
-    out.append("<dt>Directory A</dt><dd>%s</dd>" % escape(dir_a))
-    out.append("<dt>Directory B</dt><dd>%s</dd>" % escape(dir_b))
+    for label, value in _subject_rows(source, dir_a, dir_b):
+        out.append("<dt>%s</dt><dd>%s</dd>" % (escape(label), escape(value)))
     out.append(
         "<dt>Generated</dt><dd>%s</dd>" % datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     )
@@ -441,7 +508,7 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     else:
         out.append('<div class="changes">')
         for rel in sorted(real):
-            out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label))
+            out.append(_change_block(rel, comparison, analyses, real, pane_a, pane_b, file_label))
         out.append("</div>")
     out.append("</section>")
 

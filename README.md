@@ -243,6 +243,12 @@ python3 -m manishtana --git /path/to/repo --from origin/main            # --to d
 | `--to` | `HEAD` | The new revision |
 | `--intent-context` | off | Also give the commit messages to the model — see below |
 
+The report identifies itself by revision, not by the directories it happened to
+use. The Markdown, HTML and JSON headers carry the repository path, both resolved
+shas beside the symbolic names you typed, and a `Reproduce` line — a sha-pinned
+command that regenerates the same report from anywhere. The temporary export
+directories are never named: they are deleted before you open the report.
+
 The export uses `git archive`, so nothing in your working tree is touched, no
 `.git` directory reaches the comparison, and a dirty checkout does not affect the
 result. A revision that does not resolve is an error before anything is exported.
@@ -381,22 +387,27 @@ them declarable too.
 |---|---|---|
 | `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
 | `-H` HTML | A human reviewer, offline | Self-contained, side-by-side, no JavaScript |
-| `-j` JSON | Agents, CI, review bots | `schema_version: 1` |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 3` |
 
 The report opens with the whole-change brief, the executive summary, and any
 cross-reference findings — then the file table, then each change.
 
 The HTML renders diffs **side by side with line matching**: two panes headed with
-the directory each belongs to, an edited line carrying old and new on one row with
-only the differing characters marked, insertions and deletions leaving the opposite
-pane blank, and `⋯` where hunks were skipped. Hovering either side highlights its
+the directory each belongs to — the short sha in `--git` mode — an edited line
+carrying old and new on one row with only the differing characters marked,
+insertions and deletions leaving the opposite pane blank, and `⋯` where hunks
+were skipped. Hovering either side highlights its
 counterpart, because corresponding lines share a table row — no script involved.
 See [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) for the full visual language.
 
 The JSON carries `brief`, `summary`, `counts`, `cross_reference` (`removed` and
 `dangling`), `inputs.prompts_sha256` — a fingerprint of the exact prompt set used,
 so a report is traceable to what produced it — and per-file `risk`, `analysis` and
-`diff`.
+`diff`. `source` says what was compared: either
+`{"kind": "directories", "dir_a", "dir_b"}` or
+`{"kind": "git", "repo", "from": {"rev", "sha"}, "to": {…}, "command"}`. The
+top-level `dir_a`/`dir_b` remain for schema-2 consumers, but in `--git` mode they
+name temporary exports — read `source` instead.
 
 **`risk` and `analysis` are genuinely nullable.** Binaries are never analysed, a
 dead endpoint yields nothing, and files past `max_files` get no prose. Combined
@@ -410,7 +421,7 @@ extracted — it never means Low.
 python3 -m unittest discover -s tests
 ```
 
-139 tests over the pure logic — rule matching, line ignoring, path handling, diff
+166 tests over the pure logic — rule matching, line ignoring, path handling, diff
 splitting and alignment, symbol extraction and cross-referencing, settings
 validation, the three-pass call sequence, risk extraction, and Markdown, HTML and
 JSON rendering including HTML escaping. No git, no normalizers, no network.
@@ -433,9 +444,6 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
   genuinely different files look identical, which is the worse failure.
 - **The cross-reference reads text, not C.** A name in a comment counts as a
   reference.
-- **In `--git` mode the report's "Directory A/B" rows name temporary paths** that
-  no longer exist once the run finishes. The revisions are on stdout and in the
-  *Stated intent* section; the header rows are not yet the place to look.
 - A failed model call does not stop the run — a warning goes to stderr and the
   report is produced without that analysis.
 - Skipped files are never compared, so the report cannot say what changed in them.

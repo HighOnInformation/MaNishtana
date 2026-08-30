@@ -9,8 +9,12 @@ it calls.
 
 Two input shapes reach the same pipeline. Two directories is the original one. A
 git repository and a revision range is the second: `gitrepo` exports both
-revisions into a temporary directory and the comparison proceeds unchanged, so
-nothing downstream knows which shape it was given.
+revisions into a temporary directory and the comparison proceeds unchanged.
+
+The comparison does not know which shape produced its trees, and does not need
+to — but the report does. A reader opening it later cannot be told the run
+compared two temporary directories that no longer exist, so a `gitrepo.Source`
+describing the revisions travels alongside the trees and reaches `output` only.
 """
 
 import argparse
@@ -59,7 +63,7 @@ def main(argv=None):
         if not os.path.isdir(path):
             sys.stderr.write("Error: '%s' is not an existing directory.\n" % path)
             return 2
-    return _run(args, config, settings, dir_a, dir_b, [])
+    return _run(args, config, settings, dir_a, dir_b, [], None)
 
 
 # --- internals ---------------------------------------------------------------
@@ -83,6 +87,7 @@ def _run_git(args, config, settings):
                              "to HEAD).\n")
             return 2
 
+    repo = os.path.abspath(args.git)
     resolved = {}
     for name, rev in (("from", rev_a), ("to", rev_b)):
         sha = gitrepo.resolve(args.git, rev)
@@ -106,11 +111,39 @@ def _run_git(args, config, settings):
             return 2
         print("Comparing %s..%s (%d commit%s) from %s"
               % (resolved["from"][:9], resolved["to"][:9], len(commits),
-                 "" if len(commits) == 1 else "s", args.git))
-        return _run(args, config, settings, dir_a, dir_b, commits)
+                 "" if len(commits) == 1 else "s", repo))
+        source = gitrepo.Source(
+            repo=repo,
+            rev_a=rev_a, sha_a=resolved["from"],
+            rev_b=rev_b, sha_b=resolved["to"],
+            command=_reproduce(repo, resolved["from"], resolved["to"], args),
+        )
+        return _run(args, config, settings, dir_a, dir_b, commits, source)
 
 
-def _run(args, config, settings, dir_a, dir_b, commits):
+def _reproduce(repo, sha_a, sha_b, args):
+    """The command that regenerates this report, for the header to carry.
+
+    Not `sys.argv`: that names the output paths of this run and whatever branch
+    name was typed, which resolves elsewhere once the branch moves. Shas and the
+    absolute repository path are the only form of the invocation that still means
+    the same thing when someone re-runs it from another directory next month.
+    """
+    parts = ["python -m manishtana", "--git %s" % _shell_quote(repo),
+             "--from %s" % sha_a, "--to %s" % sha_b]
+    if args.intent_context:
+        parts.append("--intent-context")
+    if args.no_llm:
+        parts.append("--no-llm")
+    return " ".join(parts)
+
+
+def _shell_quote(text):
+    """Quote a path for display only — it is never handed to a shell here."""
+    return '"%s"' % text if " " in text else text
+
+
+def _run(args, config, settings, dir_a, dir_b, commits, source):
     """The pipeline itself, identical whichever input shape produced the trees."""
     llm = config.get("llm") or {}
     comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
@@ -144,6 +177,7 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         "risk": settings.risk,
         "commits": commits,
         "intent_shown": bool(intent),
+        "source": source,
     }
     report = build_report(dir_a, dir_b, comparison, analyses, summary, **shared)
     if not _write(args.output, report, "report"):
