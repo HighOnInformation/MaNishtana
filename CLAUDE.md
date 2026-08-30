@@ -60,6 +60,7 @@ settings  ←  llm, cli                    (settings imports nothing from the pa
 ```
 
 Keep it that way. `output.py` and `llm.py` are leaves that `cli` wires together.
+`cli` also imports `gitdiff` and `rules` directly, for `--check` only: same direction, no cycle.
 
 **Inputs are data, not code.** `settings.py` resolves the prompts, the risk labels
 and the normalizer command lines from the config, falling back to built-in defaults.

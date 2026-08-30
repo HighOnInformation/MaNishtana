@@ -227,6 +227,7 @@ python3 -m manishtana DIR_A DIR_B -c config.json -o report.md -H report.html -j 
 | `-H`, `--html` | off | Also write a self-contained HTML report |
 | `-j`, `--json` | off | Also write JSON for automated consumers |
 | `--no-llm` | off | Skip model analysis; everything deterministic still runs |
+| `--check` | off | Check the box instead of comparing: interpreter, git, the normalizers these rules need, config, prompt digest, endpoint. Then exit |
 
 ### Comparing two revisions of a git repository
 
@@ -268,8 +269,10 @@ Report written to report.md — 7 real changes, 3 noise only, 1 skipped.
 
 Everything else — every warning, every error — goes to stderr. **Capture it.**
 Warnings never appear in the report, and some change how much you should trust it.
-Exit codes: `0` written (even with warnings), `2` bad input or a failed write, `1`
-an uncaught exception.
+Exit codes: `0` written (even with warnings), `2` bad input, a failed write, a
+box missing something required, or `llm.model` still set to the placeholder that
+`config.json` ships with, `1` an uncaught exception. With `--check`, `0` means
+every required row passed and `2` that one did not.
 
 ## Configuration
 

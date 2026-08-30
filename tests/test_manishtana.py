@@ -1,4 +1,4 @@
-"""Unit tests for manishtana — no git, no normalizers, no network.
+"""Unit tests for manishtana — no git repository, no normalizers, no network.
 
 Run from the repository root:
 
@@ -8,6 +8,13 @@ Most tests exercise the public interface of a module. A few reach for underscore
 names: those are internal seams, private to their module but used by its own tests
 because git's path formatting and the risk-extraction regex have enough edge cases
 that testing them only from the outside would make failures hard to localize.
+
+One documented exception to "no subprocesses": the CliCheck tests run `--check`,
+whose whole job is to read the box, so they spawn `git --version` and call
+shutil.which. They are written to pass whether or not git is installed here --
+a suite that must run on a bare target box may not assume it is -- and they need
+no repository and no network. Faking that probe would have meant testing a seam
+instead of the command.
 """
 
 import contextlib
