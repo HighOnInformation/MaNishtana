@@ -71,11 +71,18 @@ def prepare_copy(src, dst, rules, settings=None):
     built-in defaults are used when it is absent.
     """
     aliases, timeout, token = _from_settings(settings)
-    shutil.copytree(src, dst)
+    # symlinks=True copies links as links. The default dereferences them, pulling
+    # whatever they point at — outside the tree included — into the temporary
+    # copy, which then gets compared as though it belonged here.
+    shutil.copytree(src, dst, symlinks=True)
     for root, _dirs, files in os.walk(dst):
         for name in files:
             path = os.path.join(root, name)
             rel = os.path.relpath(path, dst).replace("\\", "/")
+            # Reading or rewriting a link acts on its target, which the copy
+            # above deliberately did not bring across.
+            if os.path.islink(path):
+                continue
             rule = _matching_rule(rules, rel)
             if rule is None:
                 continue
@@ -140,35 +147,43 @@ def _matching_rule(rules, rel):
     return None
 
 
-def _program_of(command):
-    """Extract the executable name from a shell command string."""
-    command = command.strip()
-    if command.startswith('"'):
-        end = command.find('"', 1)
-        if end > 0:
-            return command[1:end]
-    parts = command.split()
-    return parts[0] if parts else ""
+def _split_command(command):
+    """Split a configured command line into argv, for running without a shell.
 
-
-def _quote_name(name):
-    """Quote a filename before it is spliced into a shell command line.
-
-    The name comes from the tree being compared, which for this tool is source
-    from somewhere else — so it is untrusted input reaching a shell. cmd.exe does
-    not honour metacharacters inside double quotes; POSIX shells need shlex.
-    Without this, a file called 'x&mkdir OWNED&.c' runs mkdir during a comparison,
-    and the benign 'my file.c' arrives at the normalizer as two arguments.
+    shlex gets Windows wrong in both directions: posix=True strips the
+    backslashes out of C:\Python\python.exe, and posix=False leaves the quotes
+    inside the token so the executable name becomes literally '"C:/py.exe"'.
+    Split without posix rules to keep the backslashes, then drop the quote pair
+    that leaves behind. The default json-sort normalizer is exactly this shape —
+    sys.executable, quoted, containing backslashes — so neither mode works alone.
     """
     if os.name == "nt":
-        return '"%s"' % name.replace('"', "")
-    return shlex.quote(name)
+        parts = shlex.split(command, posix=False)
+        return [
+            part[1:-1] if len(part) >= 2 and part[0] == '"' and part[-1] == '"' else part
+            for part in parts
+        ]
+    return shlex.split(command)
+
+
+def _program_of(argv):
+    """The executable a resolved command will run."""
+    return argv[0] if argv else ""
 
 
 def _command_for(step, name, aliases=None):
-    """Resolve an alias and substitute {name}, quoted. The rest is run as written."""
+    """Resolve an alias to argv, substituting {name} into the argument itself.
+
+    The filename reaches the normalizer as its own argv element and never passes
+    through a shell. It comes from the tree being compared — source from
+    somewhere else, so it is untrusted — and spliced into a shell string, a file
+    called 'x&mkdir OWNED&.c' runs mkdir during a comparison. Quoting that safely
+    on cmd.exe is not actually possible: %VAR% still expands inside double
+    quotes. Removing the shell removes the question.
+    """
     table = _ALIASES if aliases is None else aliases
-    return table.get(step, step).replace("{name}", _quote_name(name))
+    template = table.get(step, step)
+    return [part.replace("{name}", name) for part in _split_command(template)]
 
 
 def _normalize_text(step, text, name, rel, aliases=None, timeout=60):
@@ -191,7 +206,6 @@ def _normalize_text(step, text, name, rel, aliases=None, timeout=60):
     try:
         proc = subprocess.run(
             command,
-            shell=True,
             input=text,
             capture_output=True,
             text=True,
@@ -227,6 +241,11 @@ def _apply_ignore_lines(text, patterns, token=IGNORED_TOKEN):
     regexes = [re.compile(p) for p in patterns]
     lines = text.split("\n")
     for index, line in enumerate(lines):
-        if any(regex.search(line) for regex in regexes):
-            lines[index] = token
+        # Splitting on \n leaves the CR of a CRLF file attached to the line.
+        # Replacing the whole line with a bare token converts just those lines to
+        # LF, and the mixed endings then surface as changes in the very diff this
+        # exists to quieten. Match without it, put it back after.
+        ending = "\r" if line.endswith("\r") else ""
+        if any(regex.search(line[: len(line) - len(ending)]) for regex in regexes):
+            lines[index] = token + ending
     return "\n".join(lines)

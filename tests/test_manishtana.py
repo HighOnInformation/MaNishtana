@@ -13,13 +13,14 @@ that testing them only from the outside would make failures hard to localize.
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manishtana.compare import Comparison, _noise
+from manishtana.compare import Comparison, _inside, _noise, _remove_tree
 from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
 from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
 from manishtana.llm import _manifest, analyze_changes
@@ -39,7 +40,7 @@ from manishtana.rules import (
     _apply_ignore_lines,
     _command_for,
     _program_of,
-    _quote_name,
+    _split_command,
     prepare_copy,
     skipped_files,
 )
@@ -116,24 +117,43 @@ class ApplyIgnoreLines(unittest.TestCase):
         self.assertEqual(_apply_ignore_lines("a\nb", ["^zzz"]), "a\nb")
 
 
-class QuoteName(unittest.TestCase):
-    """Filenames come from the compared tree — untrusted — into a shell=True line."""
+class CommandBuilding(unittest.TestCase):
+    """Filenames come from the compared tree — untrusted — and never reach a shell."""
 
-    def test_metacharacters_are_quoted(self):
-        quoted = _quote_name("x&mkdir OWNED&.c")
-        self.assertTrue(quoted[0] in "'\"" and quoted[-1] in "'\"")
-        self.assertIn("x&mkdir OWNED&.c", quoted)
+    def test_metacharacters_stay_inside_one_argument(self):
+        argv = _command_for("clang-format", "x&mkdir OWNED&.c")
+        self.assertIn("-assume-filename=x&mkdir OWNED&.c", argv)
 
-    def test_command_substitutes_the_quoted_name(self):
-        command = _command_for("clang-format", "my file.c")
-        self.assertIn(_quote_name("my file.c"), command)
-        self.assertNotIn("=my file.c", command)
+    def test_a_name_with_spaces_is_not_split_into_two_arguments(self):
+        argv = _command_for("clang-format", "my file.c")
+        self.assertIn("-assume-filename=my file.c", argv)
 
     def test_plain_name_still_substituted(self):
-        self.assertIn("sensor.c", _command_for("clang-format", "sensor.c"))
+        self.assertIn("-assume-filename=sensor.c", _command_for("clang-format", "sensor.c"))
 
     def test_unknown_step_is_still_run_as_written(self):
-        self.assertTrue(_command_for("tr -d x", "a.c").startswith("tr -d x"))
+        self.assertEqual(_command_for("tr -d x", "a.c"), ["tr", "-d", "x"])
+
+
+class SplitCommand(unittest.TestCase):
+    def test_plain_command(self):
+        self.assertEqual(
+            _split_command("clang-format -style=LLVM"), ["clang-format", "-style=LLVM"]
+        )
+
+    def test_quoted_path_with_spaces_loses_its_quotes(self):
+        self.assertEqual(
+            _split_command('"C:/Program Files/py.exe" -c "import sys"'),
+            ["C:/Program Files/py.exe", "-c", "import sys"],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "backslash handling is Windows-specific")
+    def test_windows_backslashes_survive(self):
+        """posix=True would collapse this to C:Usersmepython.exe."""
+        self.assertEqual(
+            _split_command(r"C:\Users\me\python.exe -c code"),
+            [r"C:\Users\me\python.exe", "-c", "code"],
+        )
 
 
 class PrepareCopy(unittest.TestCase):
@@ -192,11 +212,101 @@ class PrepareCopy(unittest.TestCase):
 
 
 class ProgramOf(unittest.TestCase):
-    def test_plain_command(self):
-        self.assertEqual(_program_of("clang-format -style=LLVM"), "clang-format")
+    def test_first_argument_is_the_program(self):
+        self.assertEqual(_program_of(["clang-format", "-style=LLVM"]), "clang-format")
 
-    def test_quoted_path_with_spaces(self):
-        self.assertEqual(_program_of('"C:/Program Files/py.exe" -c "x"'), "C:/Program Files/py.exe")
+    def test_empty_argv_has_no_program(self):
+        self.assertEqual(_program_of([]), "")
+
+
+class LineEndings(unittest.TestCase):
+    def test_crlf_endings_survive_replacement(self):
+        """A CRLF file must not come back half LF — that is noise this tool created."""
+        text = "keep\r\n#define BUILD_NUMBER 7\r\nkeep too\r\n"
+        result = _apply_ignore_lines(text, [r"^\s*#define\s+BUILD_NUMBER\b"])
+        self.assertEqual(result, "keep\r\n" + IGNORED_TOKEN + "\r\nkeep too\r\n")
+
+    def test_an_lf_file_gains_no_carriage_returns(self):
+        text = "keep\n#define BUILD_NUMBER 7\nkeep too"
+        result = _apply_ignore_lines(text, [r"^\s*#define\s+BUILD_NUMBER\b"])
+        self.assertNotIn("\r", result)
+
+
+class InsideRoot(unittest.TestCase):
+    """git reports paths for trees this tool did not create."""
+
+    def setUp(self):
+        # A real directory, not the working directory: the image runs its tests
+        # from /, and nothing can escape the filesystem root, so cwd would make
+        # these two assertions vacuously false.
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_normal_relative_path_resolves(self):
+        self.assertIsNotNone(_inside(self.root, "sub/file.c"))
+
+    def test_an_absolute_path_is_refused(self):
+        escape = "C:/Windows/win.ini" if os.name == "nt" else "/etc/passwd"
+        self.assertIsNone(_inside(self.root, escape))
+
+    def test_a_dotdot_escape_is_refused(self):
+        self.assertIsNone(_inside(self.root, "../../../../etc/passwd"))
+
+
+class RemoveTree(unittest.TestCase):
+    def test_a_read_only_file_does_not_block_cleanup(self):
+        """copytree preserves the read-only bit; Windows then refuses to delete it."""
+        tmp = tempfile.mkdtemp()
+        target = os.path.join(tmp, "vendor.h")
+        with open(target, "w") as handle:
+            handle.write("#define X 1\n")
+        os.chmod(target, stat.S_IREAD)
+        try:
+            _remove_tree(tmp)
+            self.assertFalse(os.path.exists(tmp))
+        finally:
+            if os.path.exists(target):
+                os.chmod(target, stat.S_IWRITE)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class GitTimeout(unittest.TestCase):
+    def test_a_wedged_git_returns_empty_instead_of_hanging(self):
+        from manishtana import gitdiff
+
+        def wedged(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+        original = gitdiff.subprocess.run
+        gitdiff.subprocess.run = wedged
+        try:
+            self.assertEqual(gitdiff._git(["--name-status"], None, "git diff"), "")
+        finally:
+            gitdiff.subprocess.run = original
+
+
+@unittest.skipIf(os.name == "nt", "creating symlinks needs privilege on Windows")
+class SymlinkHandling(unittest.TestCase):
+    def test_a_link_out_of_the_tree_is_not_dereferenced(self):
+        base = tempfile.mkdtemp()
+        try:
+            outside = os.path.join(base, "secret.c")
+            with open(outside, "w") as handle:
+                handle.write("int secret(void){ return 1; }\n")
+            src = os.path.join(base, "src")
+            os.mkdir(src)
+            os.symlink(outside, os.path.join(src, "link.c"))
+            dst = os.path.join(base, "copy")
+            prepare_copy(src, dst, [{"match": ["*.c"], "ignore_lines": ["^int"]}])
+            self.assertTrue(
+                os.path.islink(os.path.join(dst, "link.c")), "the link was dereferenced"
+            )
+            with open(outside) as handle:
+                self.assertIn("int secret", handle.read())
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 # --- settings ----------------------------------------------------------------

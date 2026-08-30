@@ -1,6 +1,6 @@
-# Comprehensive Expert Panel Audit Report: NafkaMina (`manishtana`)
+# Comprehensive Expert Panel Audit Report: MaNishtana (`manishtana`)
 
-**Project Target:** `NafkaMina`  
+**Project Target:** `MaNishtana`  
 **Evaluated Codebase:** Pure Python standard-library rule-based directory diffing & LLM analysis pipeline  
 **Panel Expertise:** Security Architecture, Cross-Platform QA Reliability, and Zero-JS Frontend UX Engineering  
 **Overall Status:** **88 / 100 — Exceptional Architecture & UX with Targeted Security & Cross-Platform Remediation Needs**
@@ -9,7 +9,7 @@
 
 ## Panel Overview & Executive Summary
 
-A multi-agent panel of domain specialists performed a comprehensive audit of the **NafkaMina** project (`manishtana` engine). The tool is designed to separate substantive code changes from noise (formatting, comments, generated tokens) before passing diffs to a language model or rendering Markdown/HTML/JSON reports.
+A multi-agent panel of domain specialists performed a comprehensive audit of the **MaNishtana** project (`manishtana` engine). The tool is designed to separate substantive code changes from noise (formatting, comments, generated tokens) before passing diffs to a language model or rendering Markdown/HTML/JSON reports.
 
 ### Key Strengths Across All Domains
 1. **Air-Gap Compliance (100% Stdlib):** Zero third-party PyPI dependencies. Runs seamlessly on disconnected networks using pure Python 3.8+ built-ins (`urllib.request`, `tempfile`, `difflib`, `html`, `subprocess`).
@@ -23,7 +23,7 @@ A multi-agent panel of domain specialists performed a comprehensive audit of the
 *Report by Principal Software Architect & Security Auditor*
 
 ### 1.1 Dependency Hierarchy & Decoupling
-NafkaMina enforces strict module isolation:
+MaNishtana enforces strict module isolation:
 - **Leaf Modules:** `manishtana/common.py` and `manishtana/output.py` contain no side effects or internal package imports.
 - **Seam Design:** In `manishtana/llm.py`, `analyze_changes` accepts an injectable `chat(system, user, label)` callable, allowing full testing of file capping, hunk splitting, and summary folding in-process without network activity.
 
@@ -167,4 +167,4 @@ Add subtle text pseudo-elements (`+` / `-`) or distinct border styles to deletio
 ---
 
 ### Conclusion & Final Rating
-NafkaMina is an exceptionally well-designed tool that fulfills its primary mandate: **separating signal from noise in code comparisons on air-gapped systems without third-party dependencies**. Implementing the four targeted fixes above will ensure complete cross-platform stability, security hardening, and accessibility excellence.
+MaNishtana is an exceptionally well-designed tool that fulfills its primary mandate: **separating signal from noise in code comparisons on air-gapped systems without third-party dependencies**. Implementing the four targeted fixes above will ensure complete cross-platform stability, security hardening, and accessibility excellence.

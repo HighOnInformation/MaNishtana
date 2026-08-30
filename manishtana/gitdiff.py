@@ -39,10 +39,22 @@ def diff_sections(dir_a, dir_b, cwd=None):
 # functions would make failures hard to localize.
 
 
-def _git(args, cwd, label):
-    """Run a git diff --no-index invocation and return stdout."""
+def _git(args, cwd, label, timeout=300):
+    """Run a git diff --no-index invocation and return stdout.
+
+    The timeout matters more here than it looks: git is being pointed at two
+    directories this tool did not create, over storage that may be a network
+    mount. Without one, a wedged git leaves the whole comparison hanging with no
+    output and no indication of why.
+    """
     cmd = _GIT + ["diff", "--no-index", "-M"] + args
-    proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        warn("%s exceeded %ds — no diff could be produced." % (label, timeout))
+        return ""
     if proc.returncode not in (0, 1):
         warn("%s exited %d: %s" % (label, proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
     return proc.stdout.decode("utf-8", "replace")

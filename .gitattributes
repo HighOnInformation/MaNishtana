@@ -1,0 +1,14 @@
+# This repository is written on Windows and runs on Linux. Without this, a
+# Windows checkout rewrites the shell scripts to CRLF and `airgap.sh pack`
+# copies them into the transfer set with a carriage return on the shebang
+# line — which the target reports as
+#
+#     bad interpreter: /bin/bash^M: No such file or directory
+#
+# on a file that looks perfectly correct in an editor. Normalize to LF in the
+# working tree regardless of platform.
+* text=auto eol=lf
+
+# Binary artifacts of a transfer set, should any ever be committed.
+*.tar.gz binary
+*.bundle binary

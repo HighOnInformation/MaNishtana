@@ -16,6 +16,8 @@ python3 -m manishtana v1 v2 -c config.json -o report.md -H report.html 2> report
 
 | Section | |
 |---|---|
+| [QUICKSTART.md](QUICKSTART.md) | One page: load the image, run it, read the report |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Local, VM and OpenShift, with a check that proves each |
 | [How it works](#how-it-works) | The pipeline, and what is deterministic versus what the model adds |
 | [Requirements](#requirements) | Two required, two optional |
 | [Getting it onto a closed network](#getting-it-onto-a-closed-network) | The transfer set: repo, image, OS packages |

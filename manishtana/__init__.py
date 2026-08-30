@@ -6,4 +6,4 @@
 Stdlib only, no third-party dependencies. See README.md for the pipeline overview.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"

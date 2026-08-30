@@ -12,7 +12,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="MaNishtana" \
       org.opencontainers.image.description="Rule-based directory comparison, with LLM analysis of the real changes only" \
-      org.opencontainers.image.source="https://github.com/HighOnInformation/NafkaMina"
+      org.opencontainers.image.source="https://github.com/HighOnInformation/MaNishtana"
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git clang-format gcc \
@@ -44,6 +44,13 @@ RUN python -m unittest discover -s /opt/manishtana/tests \
 # rather than by root. Hardcoding a uid would break exactly that, and would
 # also make every bind-mounted output directory unwritable.
 WORKDIR /work
+
+# OpenShift's restricted SCC assigns an arbitrary uid that appears in no passwd
+# file and places it in group 0, so a root:root 755 /work is not writable there
+# and the run dies before it writes anything. Group-own by 0 and grant group
+# write: inert under docker, where the caller's --user already works, and the
+# difference between running and not running under OpenShift.
+RUN chgrp 0 /work && chmod g+rwX /work
 
 ENTRYPOINT ["python", "-m", "manishtana"]
 CMD ["--help"]

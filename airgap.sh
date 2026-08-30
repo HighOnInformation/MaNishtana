@@ -68,6 +68,14 @@ do_pack() {
     fi
 
     cp "$0" "$DIST/airgap.sh"
+
+    # The reader-facing files travel inside the set, not only in the repository.
+    # The target may never see a checkout — often dist/ is the only thing that
+    # crosses — and a transfer set that cannot explain itself is a support call.
+    for doc in QUICKSTART.md INSTALL.md run.sh; do
+        if [ -f "$doc" ]; then cp "$doc" "$DIST/$doc"; fi
+    done
+
     write_import_notes
 
     say "checksumming"
