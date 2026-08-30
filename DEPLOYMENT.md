@@ -35,18 +35,32 @@ directions:
   a red flag. Here it collapses to `noise only`, which is exactly the signal the
   verdict stage needs.
 
-The interface to the rest of the pipeline is `--json` (`schema_version: 1`):
+The two fetches are one invocation when both revisions live in the same clone:
+`--git REPO --from VULNERABLE --to FIXED` exports both trees itself and compares
+them, so the service does not have to materialize a pair of directories. See
+[Stage 2 — Run](#run) for the container form.
+
+The interface to the rest of the pipeline is `--json` (`schema_version: 2`):
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "counts":  { "real": 1, "noise": 2, "skipped": 0 },
   "llm_ran": true,
-  "files":   [ { "file": "src/auth.c", "status": "M", "binary": false,
+  "real":    [ { "file": "src/auth.c", "status": "M", "binary": false,
                  "risk": "...", "analysis": "...", "diff": "..." } ],
-  "summary": { "text": "...", "risk": "..." }
+  "summary": { "text": "...", "risk": "..." },
+  "commits": [ { "sha": "...", "author": "...", "date": "...",
+                 "subject": "...", "body": "..." } ],
+  "inputs":  { "prompts_sha256": "...", "intent_shown": false }
 }
 ```
+
+Version 2 added `commits` — what the author *claimed* the change does, present
+only in `--git` mode — and `inputs.intent_shown`, which says whether the model
+was allowed to read those messages before writing its analysis. A consumer that
+scores agreement between the diff and the message must check `intent_shown`
+first: when it is `true` the analysis is not independent of the claim.
 
 `counts.real == 0` with `counts.noise > 0` is the machine-readable form of "they
 changed the file but not the code" — usually the most interesting result the
@@ -155,6 +169,31 @@ docker run --rm --user "$(id -u):$(id -g)" \
 `USER` precisely so that works. Mount the sources read-only — the tool never
 writes to them, and enforcing that stops a bad rule from touching the tree under
 test.
+
+Reviewing a **repository** rather than two exported directories — the common
+case for the patch-verification service — mounts one directory instead of two:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/repo:/work/repo:ro" \
+  -v "$PWD/config.json:/work/config.json:ro" \
+  -v "$PWD/out:/work/out" \
+  uzanni/manishtana:1.0.1 \
+  --git /work/repo --from VULNERABLE_REV --to FIXED_REV \
+  -c config.json -o out/report.md -H out/report.html -j out/report.json \
+  2> out/report.warnings
+```
+
+`--commit REV` is the single-commit form (`REV^` to `REV`). `git archive` only
+reads, so the `:ro` mount is enough. The image runs `git config --system --add
+safe.directory '*'`, which is what stops git refusing a bind-mounted repository
+owned by another uid as "dubious ownership". The commit messages are collected
+and put in the report under **Stated intent**, but withheld from the model
+unless `--intent-context` is given — an analysis written from the diff alone is
+the only one worth checking the message against.
+
+`./run.sh --git repo --commit HEAD` is the same thing with the mounts worked out
+for you.
 
 **Always read `out/report.warnings`.** Warnings never appear in the report, and
 several of them change how much you should trust it: a missing normalizer, a

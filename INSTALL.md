@@ -117,6 +117,29 @@ would mean you are not actually using this image.
 `--user "$(id -u):$(id -g)"` keeps the reports owned by you instead of root. The
 image sets no `USER` deliberately so that this works.
 
+### Two revisions of a repository, not two directories
+
+The more common shape. One mount, and the tool exports both trees itself:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD/repo:/work/repo:ro" \
+  -v "$PWD/config.json:/work/config.json:ro" \
+  -v "$PWD/out:/work/out" \
+  manishtana --git /work/repo --commit HEAD \
+  -c config.json -o out/report.md -H out/report.html \
+  2> out/report.warnings
+```
+
+`--from REV --to REV` covers a range instead of one commit (`--to` defaults to
+`HEAD`). The read-only mount is enough — `git archive` only reads — and the
+image already sets `safe.directory '*'`, without which git refuses a
+bind-mounted repository owned by another uid. Commit messages are put in the
+report under **Stated intent** and withheld from the model unless
+`--intent-context` is given, so the analysis stays checkable against the claim.
+
+`./run.sh --git repo --commit HEAD` does the same with the mounts worked out.
+
 ### If the LLM endpoint is not reached
 
 `config.json` ships with `"base_url": "http://localhost:8000/v1"`. Inside a

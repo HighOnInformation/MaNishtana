@@ -39,6 +39,11 @@ _ALIASES = {
 }
 
 _missing_tools = set()
+_shell_syntax_reported = set()
+
+# Tokens that only mean anything to a shell. A normalizer is run without one, so
+# a command line built out of these does something other than what it says.
+_SHELL_OPERATORS = frozenset(["|", "||", "&", "&&", ";", "<", ">", ">>", "<<", "2>&1"])
 
 
 def is_binary(path):
@@ -148,7 +153,7 @@ def _matching_rule(rules, rel):
 
 
 def _split_command(command):
-    """Split a configured command line into argv, for running without a shell.
+    r"""Split a configured command line into argv, for running without a shell.
 
     shlex gets Windows wrong in both directions: posix=True strips the
     backslashes out of C:\Python\python.exe, and posix=False leaves the quotes
@@ -186,6 +191,39 @@ def _command_for(step, name, aliases=None):
     return [part.replace("{name}", name) for part in _split_command(template)]
 
 
+def _shell_syntax_in(argv):
+    """The shell operators in argv, which nothing will interpret.
+
+    Checked against whole arguments only. `{name}` is substituted into an
+    argument rather than around it, so a file called 'x&y.c' produces
+    '-assume-filename=x&y.c' and cannot be mistaken for an operator.
+    """
+    return [part for part in argv if part in _SHELL_OPERATORS]
+
+
+def _warn_once_about_shell_syntax(step, argv):
+    """Say out loud that a shell-syntax normalizer is not doing what it reads like.
+
+    Normalizers used to run through a shell; they no longer do, because a
+    filename from the compared tree reaching cmd.exe is a command execution.
+    The cost of that fix is that a pipeline configured before it silently stops
+    normalizing: the first stage runs, exits 0, and returns its input unchanged.
+    Nothing else in the run notices, and every file the pipeline used to flatten
+    is then reported as a real change. Warned once per step, like a missing tool.
+    """
+    found = _shell_syntax_in(argv)
+    if not found or step in _shell_syntax_reported:
+        return
+    _shell_syntax_reported.add(step)
+    warn(
+        "normalize step '%s' contains shell syntax (%s), and normalizers are not "
+        "run through a shell — only '%s' will run and the rest is passed to it as "
+        "arguments. Files this step was meant to flatten will be reported as real "
+        "changes. Split it into separate normalize steps, or wrap it in a script."
+        % (step, " ".join(found), _program_of(argv))
+    )
+
+
 def _normalize_text(step, text, name, rel, aliases=None, timeout=60):
     """Run one normalization step (stdin to stdout). On any failure, return the input.
 
@@ -193,6 +231,7 @@ def _normalize_text(step, text, name, rel, aliases=None, timeout=60):
     the run — an air-gapped box without clang-format should still get a report.
     """
     command = _command_for(step, name, aliases)
+    _warn_once_about_shell_syntax(step, command)
     program = _program_of(command)
     if program in _missing_tools:
         return text

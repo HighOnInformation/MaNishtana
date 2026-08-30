@@ -10,6 +10,8 @@ because git's path formatting and the risk-extraction regex have enough edge cas
 that testing them only from the outside would make failures hard to localize.
 """
 
+import contextlib
+import io
 import os
 import shutil
 import stat
@@ -17,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -40,6 +43,7 @@ from manishtana.rules import (
     _apply_ignore_lines,
     _command_for,
     _program_of,
+    _shell_syntax_in,
     _split_command,
     prepare_copy,
     skipped_files,
@@ -217,6 +221,61 @@ class ProgramOf(unittest.TestCase):
 
     def test_empty_argv_has_no_program(self):
         self.assertEqual(_program_of([]), "")
+
+
+class ShellSyntaxNormalizers(unittest.TestCase):
+    """A normalizer written as a shell pipeline no longer normalizes.
+
+    Nothing runs it through a shell any more, and the first stage of a pipeline
+    usually exits 0 having returned its input untouched — so the step degrades to
+    a no-op that no other part of the run can detect. It has to say so itself.
+    """
+
+    def setUp(self):
+        from manishtana import rules
+
+        self.rules = rules
+        rules._shell_syntax_reported.clear()
+
+    def tearDown(self):
+        self.rules._shell_syntax_reported.clear()
+
+    def test_a_pipeline_is_detected(self):
+        self.assertEqual(_shell_syntax_in(_command_for("sort | uniq", "a.c")), ["|"])
+
+    def test_a_redirect_and_an_and_are_detected(self):
+        self.assertEqual(_shell_syntax_in(["tr", "-d", "x", "&&", "sort"]), ["&&"])
+        self.assertEqual(_shell_syntax_in(["cat", ">", "out"]), [">"])
+
+    def test_the_built_in_aliases_are_clean(self):
+        for step in ("clang-format", "strip-comments", "json-sort"):
+            self.assertEqual(_shell_syntax_in(_command_for(step, "a.c")), [], step)
+
+    def test_a_metacharacter_in_a_filename_is_not_mistaken_for_one(self):
+        argv = _command_for("clang-format", "x&mkdir OWNED&.c")
+        self.assertEqual(_shell_syntax_in(argv), [])
+
+    def test_the_warning_names_the_step_and_what_will_actually_run(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.rules._warn_once_about_shell_syntax("sort | uniq", ["sort", "|", "uniq"])
+        message = stderr.getvalue()
+        self.assertIn("sort | uniq", message)
+        self.assertIn("not", message)
+        self.assertIn("'sort'", message)
+
+    def test_it_is_said_once_per_step_not_once_per_file(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            for _ in range(5):
+                self.rules._warn_once_about_shell_syntax("sort | uniq", ["sort", "|", "uniq"])
+        self.assertEqual(stderr.getvalue().count("Warning:"), 1)
+
+    def test_a_plain_command_says_nothing(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.rules._warn_once_about_shell_syntax("clang-format", ["clang-format", "-x"])
+        self.assertEqual(stderr.getvalue(), "")
 
 
 class LineEndings(unittest.TestCase):
@@ -1135,6 +1194,43 @@ class IntentText(unittest.TestCase):
         self.assertIn("Ada", text)
 
 
+class GitRepoTimeout(unittest.TestCase):
+    """gitdiff bounds its git calls; gitrepo runs against the same untrusted repository."""
+
+    @contextlib.contextmanager
+    def _wedged(self):
+        from manishtana import gitrepo
+
+        def wedged(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+        original = gitrepo.subprocess.run
+        gitrepo.subprocess.run = wedged
+        try:
+            yield gitrepo
+        finally:
+            gitrepo.subprocess.run = original
+
+    def test_a_wedged_git_raises_rather_than_hanging(self):
+        with self._wedged() as gitrepo:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(gitrepo.GitError):
+                    gitrepo._git(".", ["archive", "HEAD"])
+
+    def test_the_timeout_is_reported_even_when_resolve_swallows_it(self):
+        """resolve() turns any GitError into None, which reads as 'no such revision'."""
+        stderr = io.StringIO()
+        with self._wedged() as gitrepo:
+            with contextlib.redirect_stderr(stderr):
+                self.assertIsNone(gitrepo.resolve(".", "HEAD"))
+        self.assertIn("exceeded", stderr.getvalue())
+
+    def test_commits_degrades_to_none_rather_than_failing(self):
+        with self._wedged() as gitrepo:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(gitrepo.commits(".", "a", "b"), [])
+
+
 class IsWithin(unittest.TestCase):
     """The export unpacks an archive built from a repository the reviewer did not write."""
 
@@ -1203,6 +1299,38 @@ class CommitsInOutput(unittest.TestCase):
         payload = build_json("v1", "v2", comparison(), {}, None)
         self.assertEqual(payload["commits"], [])
         self.assertFalse(payload["inputs"]["intent_shown"])
+
+
+# --- the package as it ships -------------------------------------------------
+
+
+class SourceCompilesSilently(unittest.TestCase):
+    """No module may emit a warning when it is compiled.
+
+    The image sets PYTHONDONTWRITEBYTECODE=1, so nothing is cached and every
+    module is compiled on every run. A SyntaxWarning from a docstring therefore
+    lands in out/report.warnings — the file run.sh prints and DEPLOYMENT.md tells
+    the operator to read first — every time, above the warnings that mean
+    something. Non-raw docstrings full of Windows paths are how it happens.
+    """
+
+    def test_every_module_compiles_without_warnings(self):
+        package = os.path.join(os.path.dirname(os.path.dirname(__file__)), "manishtana")
+        found = []
+        for name in sorted(os.listdir(package)):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(package, name)
+            with open(path, "r", encoding="utf-8") as handle:
+                source = handle.read()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                compile(source, path, "exec")
+            found.extend(
+                "manishtana/%s:%s %s: %s" % (name, item.lineno, item.category.__name__, item.message)
+                for item in caught
+            )
+        self.assertEqual(found, [])
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# run.sh — compare two directories with MaNishtana, in the container.
+# run.sh — compare two directories, or two revisions, with MaNishtana.
 #
 #   ./run.sh OLD_DIR NEW_DIR [extra args...]
+#   ./run.sh --git REPO --commit REV [extra args...]
+#   ./run.sh --git REPO --from REV [--to REV] [extra args...]
 #
 # Writes out/report.md, out/report.html and out/report.warnings.
-# Everything after the two directories is passed straight through, so
+# Everything after the input is passed straight through, so
 # `./run.sh v1 v2 --no-llm` does what you would expect.
 
 set -euo pipefail
@@ -12,13 +14,29 @@ set -euo pipefail
 IMAGE="${MANISHTANA_IMAGE:-manishtana}"
 OUT="${MANISHTANA_OUT:-out}"
 
+usage="usage: ./run.sh OLD_DIR NEW_DIR [extra args...]
+       ./run.sh --git REPO --commit REV [extra args...]
+       ./run.sh --git REPO --from REV [--to REV] [extra args...]"
+
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
-[ $# -ge 2 ] || die "usage: ./run.sh OLD_DIR NEW_DIR [extra args...]"
+[ $# -ge 2 ] || die "$usage"
 
-A="$1"; B="$2"; shift 2
-[ -d "$A" ] || die "'$A' is not a directory"
-[ -d "$B" ] || die "'$B' is not a directory"
+# Two input shapes reach the same pipeline, and each needs its own mounts: two
+# trees, or one repository the tool exports two revisions out of. Reviewing a
+# repository is the common case, so the wrapper has to be able to say it.
+REPO=""
+if [ "$1" = "--git" ] || [ "$1" = "-g" ]; then
+    REPO="$2"; shift 2
+    [ -d "$REPO" ] || die "'$REPO' is not a directory"
+    [ -e "$REPO/.git" ] || die "'$REPO' is not a git repository (no .git)"
+    printf '%s\n' "$@" | grep -qE '^--(commit|from|to)(=|$)' \
+        || die "--git needs --commit REV, or --from REV. $usage"
+else
+    A="$1"; B="$2"; shift 2
+    [ -d "$A" ] || die "'$A' is not a directory"
+    [ -d "$B" ] || die "'$B' is not a directory"
+fi
 
 command -v docker > /dev/null 2>&1 || die "docker not found on PATH"
 
@@ -36,14 +54,25 @@ fi
 docker image inspect "$IMAGE" > /dev/null 2>&1 \
     || die "image '$IMAGE' not loaded — run: docker load -i manishtana-image.tar.gz"
 
-# Absolute paths: docker will not accept relative ones for a bind mount.
-A="$(cd "$A" && pwd)"
-B="$(cd "$B" && pwd)"
 mkdir -p "$OUT"
 OUT_ABS="$(cd "$OUT" && pwd)"
 
+# Absolute paths: docker will not accept relative ones for a bind mount. The
+# repository is mounted read-only too — git archive only reads, and the image
+# sets safe.directory '*' so git does not refuse a tree owned by another uid.
+mounts=(-v "$(hostpath "$OUT_ABS"):/work/out")
+if [ -n "$REPO" ]; then
+    REPO="$(cd "$REPO" && pwd)"
+    mounts+=(-v "$(hostpath "$REPO"):/work/repo:ro")
+    input=(--git /work/repo)
+else
+    A="$(cd "$A" && pwd)"
+    B="$(cd "$B" && pwd)"
+    mounts+=(-v "$(hostpath "$A"):/work/v1:ro" -v "$(hostpath "$B"):/work/v2:ro")
+    input=(v1 v2)
+fi
+
 # The config is optional. Without one on the host, the image's own copy is used.
-mounts=(-v "$(hostpath "$A"):/work/v1:ro" -v "$(hostpath "$B"):/work/v2:ro"         -v "$(hostpath "$OUT_ABS"):/work/out")
 config_arg=(-c /opt/manishtana/config.json)
 if [ -f config.json ]; then
     mounts+=(-v "$(hostpath "$(pwd)/config.json"):/work/config.json:ro")
@@ -63,7 +92,7 @@ fi
 # --user keeps the reports owned by the caller rather than by root. The image
 # sets no USER precisely so this works.
 docker run --rm --user "$(id -u):$(id -g)" "${mounts[@]}" "$IMAGE" \
-    v1 v2 "${config_arg[@]}" \
+    "${input[@]}" "${config_arg[@]}" \
     -o out/report.md -H out/report.html "$@" \
     2> "$OUT_ABS/report.warnings" || {
         status=$?

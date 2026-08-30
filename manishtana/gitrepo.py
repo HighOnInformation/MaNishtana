@@ -129,11 +129,25 @@ def intent_text(items):
 # --- internals ---------------------------------------------------------------
 
 
-def _git(repo, args):
-    """Run one git command in repo and return raw stdout, or raise GitError."""
-    proc = subprocess.run(
-        _GIT + args, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+def _git(repo, args, timeout=300):
+    """Run one git command in repo and return raw stdout, or raise GitError.
+
+    Bounded for the same reason `gitdiff._git` is: this points git at a
+    repository the reviewer did not write, possibly on a network mount, and a
+    `git archive` that never returns leaves the run hanging with no output and
+    nothing said about why. A timeout is a GitError like any other failure, so
+    every caller already handles it.
+    """
+    try:
+        proc = subprocess.run(
+            _GIT + args, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        # Said here as well as raised, because `resolve` turns a GitError into a
+        # plain None and its caller then reports a revision that does not exist.
+        warn("git %s exceeded %ds in %s." % (args[0], timeout, repo))
+        raise GitError("git %s exceeded %ds" % (args[0], timeout))
     if proc.returncode != 0:
         detail = proc.stderr.decode("utf-8", "replace").strip().split("\n")[0]
         raise GitError(detail or "git exited %d" % proc.returncode)

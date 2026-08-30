@@ -32,7 +32,7 @@ git --version                            # 2.30+, needs diff --no-index
 python3 -m manishtana --help                # proves the package copied whole
 clang-format --version                   # optional normalizer
 gcc --version                            # optional, powers strip-comments
-python3 -m unittest discover -s tests    # 93 tests, no git or network needed
+python3 -m unittest discover -s tests    # 179 tests, no git or network needed
 python3 -m manishtana v1 v2 -c config.json -o /tmp/smoke.md --no-llm 2> /tmp/smoke.warn
 ```
 
@@ -309,7 +309,7 @@ blank region is never allowed to stand in for a state.
 |---|---|---|
 | `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
 | `-H` HTML | A human reviewer, offline, possibly on another machine | Self-contained: one inlined `<style>`, no URL, `<link>`, `<img>`, `src=` or `@import` — enforced by test. Opens from `file://`. **Never feed it to a model** |
-| `-j` JSON | Agents, CI, review bots | `schema_version: 1`. `risk` and `analysis` may be `null`; `llm_ran` says whether prose was produced at all |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 2`. `risk` and `analysis` may be `null`; `llm_ran` says whether prose was produced at all |
 
 ---
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-python -m unittest discover -s tests                    # full suite (139 tests, no git/network needed)
+python -m unittest discover -s tests                    # full suite (179 tests, no git/network needed)
 cd tests && python -m unittest test_manishtana.ExtractRisk.test_plain_level   # a single test or class
 python -m unittest discover -s tests -k test_plain_level                   # or by name pattern
 

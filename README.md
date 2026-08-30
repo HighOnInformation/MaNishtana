@@ -368,10 +368,20 @@ they sit together.
 
 Built-in aliases are `clang-format`, `strip-comments` (`gcc -fpreprocessed -dD -E -P
 -x c -`) and `json-sort` (the running interpreter, so it needs nothing on `PATH`).
-Any other string is run as a shell command as written. `{name}` is substituted with
-the basename **already quoted for the shell** — do not add quotes of your own.
-Filenames come from someone else's tree, and an unquoted `{name}` would let a file
-called `x&mkdir OWNED&.c` run a command during the comparison.
+Any other string is split into an argument vector and run **without a shell**.
+`{name}` is substituted into the argument that contains it, unquoted — do not add
+quotes of your own. Filenames come from someone else's tree, and a file called
+`x&mkdir OWNED&.c` reaching `cmd.exe` would run a command during the comparison;
+there is no way to quote that safely there, so the shell is gone instead.
+
+The cost is that **shell syntax is not interpreted**: a pipe, a redirect, `&&`,
+a glob or `$VAR` is passed to the program as a literal argument. A step written
+as `sort | uniq` runs `sort` with the arguments `|` and `uniq`. Use one
+`normalize` entry per stage — they are applied in order, each one's output
+feeding the next — or point the step at a script that does the shell part. A
+step containing shell syntax warns once per run and names what will actually
+run, because a pipeline whose first stage exits successfully otherwise looks
+like normalization that simply found nothing to change.
 
 Still compiled in, deliberately: the three lines of diff context, rename detection,
 and the 0.5 similarity floor for character-level marking. Say the word if you want
@@ -383,7 +393,7 @@ them declarable too.
 |---|---|---|
 | `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
 | `-H` HTML | A human reviewer, offline | Self-contained, side-by-side, no JavaScript |
-| `-j` JSON | Agents, CI, review bots | `schema_version: 1` |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 2` |
 
 The report opens with the whole-change brief, the executive summary, and any
 cross-reference findings — then the file table, then each change.
@@ -412,10 +422,13 @@ extracted — it never means Low.
 python3 -m unittest discover -s tests
 ```
 
-139 tests over the pure logic — rule matching, line ignoring, path handling, diff
+179 tests over the pure logic — rule matching, line ignoring, path handling, diff
 splitting and alignment, symbol extraction and cross-referencing, settings
 validation, the three-pass call sequence, risk extraction, and Markdown, HTML and
 JSON rendering including HTML escaping. No git, no normalizers, no network.
+
+One is skipped on Windows: creating a symlink needs privilege there, so the test
+that proves `prepare_copy` does not follow one out of the tree cannot run.
 
 ## Known limitations
 

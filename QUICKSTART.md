@@ -44,6 +44,23 @@ That is it. You get:
 
 Open `out/report.html` in a browser — it is self-contained, no server needed.
 
+## 4. Or review a git repository
+
+More often the two versions are two revisions of one repository rather than two
+exported directories. Then you do not export anything:
+
+```bash
+./run.sh --git path/to/repo --commit HEAD          # one commit: HEAD^ to HEAD
+./run.sh --git path/to/repo --from v2.06 --to v2.12
+```
+
+The tool exports both revisions itself and compares them; the output is the same
+three files. The commit messages appear in the report under **Stated intent**,
+but the model is not shown them — so the analysis is an independent reading of
+the diff, and you can check it against what the commit *claimed*. Add
+`--intent-context` if you would rather the model see them; the report then says
+so, in place of the independence note.
+
 ### No LLM endpoint yet?
 
 The report has two halves: a diff-based half that always works, and an LLM

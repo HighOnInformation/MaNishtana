@@ -87,7 +87,7 @@ def _find_binaries(real, dir_a, dir_b):
 
 
 def _inside(root, rel):
-    """Join rel onto root, or None when the result would escape root.
+    r"""Join rel onto root, or None when the result would escape root.
 
     os.path.join discards root entirely the moment rel is absolute, so a path
     arriving as '/etc/passwd' or 'C:\Windows\...' would otherwise be opened and

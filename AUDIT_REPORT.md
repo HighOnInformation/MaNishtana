@@ -29,38 +29,64 @@ MaNishtana enforces strict module isolation:
 
 ### 1.2 Security Findings & Risk Assessment
 
-| Risk Level | Finding | Location | Vulnerability & Impact |
-| :---: | :--- | :--- | :--- |
-| HIGH | **Windows Shell Injection** | `manishtana/rules.py` | `_normalize_text` calls `subprocess.run(command, shell=True)`. On Windows `cmd.exe`, `_quote_name()` strips `"` but does not sanitize `%` (environment variable expansion) or control operators (`^`, `&`, `|`). Malicious filenames inside untrusted repositories can trigger unintended command execution under `cmd.exe`. |
-| MEDIUM | **Path Traversal in `_find_binaries`** | `manishtana/compare.py` | `os.path.join(root, rel)` resets `root` if `rel` starts with a leading separator or drive letter (e.g. `/etc/passwd`), attempting binary inspection outside the comparison tree. |
-| LOW | **Symlink Dereferencing** | `manishtana/rules.py` | `shutil.copytree(src, dst)` follows symlinks by default (`symlinks=False`), recursively copying target files outside the repository root into temporary storage. |
-| PASS | **Temp Directory Security** | `manishtana/compare.py` | `tempfile.TemporaryDirectory()` enforces restricted OS permissions (`0700` on POSIX) and ensures automatic context cleanup. |
+This table records the audit as delivered. The status column was added afterwards
+and is the current state of the tree; the finding text is left as written so the
+fix can be read against the report that asked for it.
+
+| Risk Level | Status | Finding | Location | Vulnerability & Impact |
+| :---: | :--- | :--- | :--- | :--- |
+| HIGH | **Fixed in 1.0.1.** `shell=True` is gone: `_command_for` returns argv and `_split_command` builds it, so a filename never reaches a shell. It cost a documented feature — a `normalizers` entry written as a shell pipeline no longer pipes — which `README.md` now states and `rules._warn_once_about_shell_syntax` says out loud at run time. | **Windows Shell Injection** | `manishtana/rules.py` | `_normalize_text` calls `subprocess.run(command, shell=True)`. On Windows `cmd.exe`, `_quote_name()` strips `"` but does not sanitize `%` (environment variable expansion) or control operators (`^`, `&`, `|`). Malicious filenames inside untrusted repositories can trigger unintended command execution under `cmd.exe`. |
+| MEDIUM | **Fixed in 1.0.1** by `compare._inside`, which refuses any join that leaves the root. Covered by `InsideRoot`. | **Path Traversal in `_find_binaries`** | `manishtana/compare.py` | `os.path.join(root, rel)` resets `root` if `rel` starts with a leading separator or drive letter (e.g. `/etc/passwd`), attempting binary inspection outside the comparison tree. |
+| LOW | **Fixed in 1.0.1** — `prepare_copy` copies with `symlinks=True`. Covered by `SymlinkHandling`, which is skipped on Windows, where making a symlink needs privilege. | **Symlink Dereferencing** | `manishtana/rules.py` | `shutil.copytree(src, dst)` follows symlinks by default (`symlinks=False`), recursively copying target files outside the repository root into temporary storage. |
+| PASS | **No longer accurate.** 1.0.1 replaced `TemporaryDirectory()` with `mkdtemp()` plus `compare._remove_tree`, for the read-only cleanup defect in §2.3. `mkdtemp` creates the same `0700` directory, so the permission property is unchanged; automatic cleanup is not, and `compare()` now removes the tree in a `finally`. `cli._run_git` still uses `TemporaryDirectory()`, deliberately — see §2.3. | **Temp Directory Security** | `manishtana/compare.py` | `tempfile.TemporaryDirectory()` enforces restricted OS permissions (`0700` on POSIX) and ensures automatic context cleanup. |
 
 ---
 
 ## 2. QA, Test Reliability & Cross-Platform Audit
 *Report by Lead QA & Test Reliability Engineer*
 
-### 2.1 Test Suite Breakdown (90 Unit Tests)
-The test suite in `tests/test_manishtana.py` runs 90 unit tests in **0.055s** with 100% pass rate:
+### 2.1 Test Suite Breakdown (90 Unit Tests at the time of the audit; **179 now**)
+The test suite in `tests/test_manishtana.py` runs 179 unit tests in well under a second with 100% pass rate:
 - **Zero Network/Git Operations in Tests:** Operates purely in-memory using `tempfile` structures and mock callables.
 - **High Unit Coverage:** Extensively tests git name status parsing, diff section splitting, risk keyword extraction, word-level diff marking, and HTML escaping.
 
 ### 2.2 Coverage Gaps & Untested Public Entry Points
-- `compare.py` Orchestration (`compare()`, `_find_binaries()`): 0 unit tests directly call the pipeline orchestrator.
-- `cli.py` Core Entrypoint (`main()`, `_parse_args()`): 0 unit tests test command-line parsing, argument validation, or exit codes.
-- `gitdiff.py` Process Execution (`_git()`): Subprocess returncode handling and stderr warnings are untested.
+- `compare.py` Orchestration (`compare()`, `_find_binaries()`): 0 unit tests directly call the pipeline orchestrator. **Still open** — `compare()` needs a real `git diff`, which the suite refuses to depend on.
+- `cli.py` Core Entrypoint (`main()`, `_parse_args()`): 0 unit tests test command-line parsing, argument validation, or exit codes. **Still open**, and now the larger of the two: `--git`/`--commit`/`--from`/`--to` and their mutual exclusions all live here.
+- `gitdiff.py` Process Execution (`_git()`): Subprocess returncode handling and stderr warnings are untested. **Partly closed** — `GitTimeout` and `GitRepoTimeout` cover the timeout path in both `gitdiff` and `gitrepo`; returncode and stderr handling are still untested.
 
 ### 2.3 Cross-Platform & Resilience Defects
 
 **CRITICAL WINDOWS FAILURE MODE: Read-Only Files in Temp Cleanup**
 `shutil.copytree` preserves file mode bits (including read-only `stat.S_IREAD`). On Windows, `tempfile.TemporaryDirectory` cleanup fails with `PermissionError: [WinError 5] Access is denied` when attempting to delete read-only files, causing `manishtana` to throw an unhandled exception upon exit.
 
+**Fixed in 1.0.1** by `compare._remove_tree`, covered by `RemoveTree`. The named
+mechanism does not hold as written, though, and it matters for anyone applying
+the same reasoning elsewhere: measured on Python 3.12.10 / Windows 11,
+`TemporaryDirectory` cleans a read-only file up *successfully* —
+`TemporaryDirectory._rmtree` carries a `PermissionError` handler that resets the
+mode and retries — while bare `shutil.rmtree`, which `_remove_tree` tries first,
+raises `PermissionError(13)`. The fix is still worth having: it is explicit,
+tested, and does not depend on an interpreter-version detail. But
+`cli._run_git`'s `TemporaryDirectory()` is **not** the same defect and was left
+alone; it holds a `git archive` export, and git records only the executable bit,
+so no read-only file can arrive there (verified: 28 exported files, all `0o666`).
+
 **Line Ending Contamination (CRLF vs LF)**
 In `manishtana/rules.py`, `_apply_ignore_lines()` splits text on `\n`. On Windows files using `\r\n`, matching lines are replaced with `IGNORED_TOKEN` (which ends in `\n` without `\r`). This contaminates the file with mixed line endings, introducing artificial diff noise in git.
 
+**Fixed in 1.0.1** — the CR is stripped before matching and put back after.
+Covered by `LineEndings`.
+
 **Git Execution Timeout Defect**
 `_git()` in `manishtana/gitdiff.py` invokes `subprocess.run()` without a `timeout` argument. If `git` hangs or deadlocks, `manishtana` will hang indefinitely.
+
+**Fixed in 1.0.1** for `gitdiff`, and afterwards for `gitrepo._git`, which the
+audit predates: `--git` mode runs `rev-parse`, `log` and `archive` against a
+repository the reviewer did not write, so it needed the same bound. A timeout
+there raises `GitError` and is also warned about directly, because `resolve()`
+turns any `GitError` into `None` and its caller then reports a revision that
+does not exist.
 
 ---
 
@@ -97,6 +123,11 @@ In `manishtana/rules.py`, `_apply_ignore_lines()` splits text on `\n`. On Window
 ---
 
 ## 4. Prioritized Action Plan & Recommended Code Fixes
+
+*Items 1–3 shipped in 1.0.1, but not as written below: §1 removed the shell
+rather than quoting for it, and §2 replaced `TemporaryDirectory` rather than
+wrapping it. The code here is the recommendation, kept for the record; the tree
+is what actually happened.*
 
 ### 1. Fix Windows Shell Injection in Normalizer Execution (`manishtana/rules.py`)
 Tokenize commands using `shlex.split` and execute directly with `shell=False`:
