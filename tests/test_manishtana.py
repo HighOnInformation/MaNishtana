@@ -10,6 +10,9 @@ because git's path formatting and the risk-extraction regex have enough edge cas
 that testing them only from the outside would make failures hard to localize.
 """
 
+import contextlib
+import io
+import json
 import os
 import shutil
 import stat
@@ -19,6 +22,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from manishtana.cli import main
 from manishtana.compare import Comparison, _noise
 from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
 from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
@@ -1093,6 +1097,80 @@ class CommitsInOutput(unittest.TestCase):
         payload = build_json("v1", "v2", comparison(), {}, None)
         self.assertEqual(payload["commits"], [])
         self.assertFalse(payload["inputs"]["intent_shown"])
+
+
+# --- cli ---------------------------------------------------------------------
+# The only module the suite reaches through its real entry point. main(argv) was
+# always written to take argv for this; nothing here starts a subprocess, so the
+# no-git, no-network rule still holds.
+
+
+class CliArgs(unittest.TestCase):
+    """Every way the command line can be wrong, and the exit code it earns."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.config = os.path.join(self.work, "config.json")
+        self._config({"llm": {}, "rules": []})
+
+    def _config(self, data):
+        with open(self.config, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def _main(self, *argv):
+        """main() with BOTH streams captured: _configure_streams touches both."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue() + err.getvalue()
+
+    def test_an_unreadable_config_names_the_file(self):
+        code, text = self._main("a", "b", "-c", os.path.join(self.work, "nope.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("nope.json", text)
+
+    def test_a_config_that_is_not_json_is_an_error_not_a_traceback(self):
+        with open(self.config, "w", encoding="utf-8") as handle:
+            handle.write("{ this is not json")
+        code, text = self._main("a", "b", "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read config file", text)
+
+    def test_a_bad_prompt_placeholder_is_reported_before_anything_runs(self):
+        self._config({"prompts": {"file_user": "{diff} {nonsense}"}})
+        code, text = self._main("a", "b", "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("{nonsense}", text)
+
+    def test_no_input_at_all_says_what_the_two_shapes_are(self):
+        code, text = self._main("-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("two directories", text)
+        self.assertIn("--git", text)
+
+    def test_a_missing_directory_is_named(self):
+        code, text = self._main(self.work, os.path.join(self.work, "gone"), "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("gone", text)
+
+    def test_git_needs_an_existing_repository_directory(self):
+        code, text = self._main("--git", os.path.join(self.work, "gone"), "--commit", "HEAD",
+                                "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("not an existing directory", text)
+
+    def test_commit_cannot_be_combined_with_from(self):
+        code, text = self._main("--git", self.work, "--commit", "HEAD", "--from", "v1",
+                                "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("--commit cannot be combined", text)
+
+    def test_git_without_a_revision_says_which_flags_to_use(self):
+        code, text = self._main("--git", self.work, "-c", self.config)
+        self.assertEqual(code, 2)
+        self.assertIn("--commit", text)
+        self.assertIn("--from", text)
 
 
 if __name__ == "__main__":
