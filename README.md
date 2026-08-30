@@ -109,8 +109,11 @@ clang-format`, or `yum install clang-tools-extra`). Without the two optional too
 the run still produces a report, but formatting and comment changes count as real
 changes, because nothing normalized them away.
 
-`git` is the one dependency with no graceful failure: missing, you get a Python
-traceback rather than a diagnostic. Check it first.
+`python -m manishtana --check` answers all of this in one command, on every
+platform: the interpreter, git, the normalizers *these rules* need, the config,
+the prompt digest, and — unless you pass `--no-llm` — one real completion against
+`llm.base_url`. Exit 0 when the required pieces are there, 2 when they are not.
+It is the only form of that check a Windows box has: `airgap.sh` is bash.
 
 ## Getting it onto a closed network
 
@@ -142,13 +145,15 @@ Carry only what the target lacks:
 ```bash
 ./airgap.sh verify     # refuses to continue if the media corrupted anything
 ./airgap.sh import     # clones the repo, loads the image if one is present
-./airgap.sh selftest   # runs the suite HERE, and prints the tool versions
+./airgap.sh selftest   # runs the suite HERE, then calls --check
 ```
 
 `selftest` is the step people skip and should not: it proves the tool runs on
 *that* box, not merely that the bytes arrived. It probes for a working interpreter
 rather than trusting `PATH` — a `python3` that answers but does not run is a real
-thing, and it would otherwise let the suite pass while testing nothing.
+thing, and it would otherwise let the suite pass while testing nothing. What it
+then checks about the box is `python -m manishtana --check`, not a second
+implementation in shell; on a target without bash, run that command directly.
 
 The checksum catches **corruption, not tampering**: if `SHA256SUMS` rides the same
 media, anyone who alters a file can regenerate it. If tampering is in your threat
@@ -174,8 +179,8 @@ already had — which is what `--dry-run` is for.
 
 The package is 253 KB of Python. Copying `manishtana/`, `tests/` and `config.json` by
 hand works, and `manishtana/` must land whole — the modules import each other, so a
-partial copy fails at import. Confirm with `python3 -m manishtana --help` and
-`python3 -m unittest discover -s tests` before you need it.
+partial copy fails at import. Confirm with `python3 -m manishtana --check --no-llm`
+and `python3 -m unittest discover -s tests` before you need it.
 
 ### Running the container
 

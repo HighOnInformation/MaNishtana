@@ -3,6 +3,7 @@
 Public interface:
     changed_files(dir_a, dir_b, cwd=None) -> {relative path: (status letter, [paths])}
     diff_sections(dir_a, dir_b, cwd=None) -> {relative path: unified diff text}
+    version() -> str | None                  git's own version, or None if unusable
 
 Both accept the two directories and return plain relative paths. Everything about
 how git invokes, quotes, prefixes and formats paths is hidden here — callers never
@@ -31,6 +32,28 @@ def diff_sections(dir_a, dir_b, cwd=None):
     """Return {relative path: unified diff text}, one entry per differing file."""
     text = _git(["--unified=3", _posix(dir_a), _posix(dir_b)], cwd, "git diff")
     return _split_sections(text, dir_a, dir_b)
+
+
+def version():
+    """Return git's reported version, or None when git cannot be run here.
+
+    This module owns every git invocation the comparison makes, so it also owns
+    the answer to "is there a git on this box". Without one there is nothing to
+    fall back to: `git diff --no-index` IS the comparison. Exposed so a caller
+    can say that in a sentence instead of raising FileNotFoundError out of
+    _git() -- and deliberately NOT by catching OSError inside _git(), which
+    would turn a missing git into an empty diff and report "no changes" for a
+    drop that changed everything. Wrong is worse than absent.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", "replace").strip() or None
 
 
 # --- internals ---------------------------------------------------------------

@@ -5,6 +5,8 @@ Public interface:
     is_binary(path) -> bool
     skipped_files(rules, paths) -> set  paths matched by a skip rule
     prepare_copy(src, dst, rules)       copy a tree and apply the rules to the copy
+    tool_status(rules, settings)        what each normalize step resolves to, and
+                                        whether that program exists here
 
 A rule is a plain dict from the config file:
 
@@ -14,6 +16,7 @@ How normalizers are spawned, how missing binaries are tolerated, and how lines a
 neutralised are all internal. Callers only ever ask for a prepared copy.
 """
 
+import collections
 import fnmatch
 import os
 import re
@@ -25,6 +28,8 @@ import sys
 from .common import warn
 
 IGNORED_TOKEN = "<<ignored-by-rule>>"
+
+ToolStatus = collections.namedtuple("ToolStatus", "step command program available")
 
 _JSON_SORT_CODE = (
     "import json,sys;"
@@ -111,6 +116,32 @@ def prepare_copy(src, dst, rules, settings=None):
                 # copytree preserves the read-only bit, so a vendor drop off an
                 # ISO lands read-only. That must not take the whole run down.
                 warn("cannot rewrite %s: %s — comparing it un-normalized." % (rel, exc))
+
+
+def tool_status(rules, settings=None):
+    """Resolve every normalize step these rules use, without touching a file.
+
+    Same alias table, same {name} substitution and same shutil.which lookup that
+    _normalize_text performs mid-run -- so a caller can report the command lines
+    that will actually be spawned, and which of them are missing, before the
+    comparison rather than in the warnings afterwards. One entry per distinct
+    step, in the order the rules mention them.
+
+    It lives here because this module already owns how a step becomes a command;
+    computing that anywhere else would be a second implementation that drifts.
+    """
+    aliases = _from_settings(settings)[0]
+    result = []
+    for rule in rules or []:
+        for step in rule.get("normalize") or []:
+            if any(item.step == step for item in result):
+                continue
+            command = _command_for(step, "FILE", aliases)
+            program = _program_of(command)
+            result.append(
+                ToolStatus(step, command, program, shutil.which(program) is not None)
+            )
+    return result
 
 
 # --- internals ---------------------------------------------------------------

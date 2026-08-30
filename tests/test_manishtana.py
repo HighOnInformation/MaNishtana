@@ -26,7 +26,7 @@ from manishtana.cli import main
 from manishtana.compare import Comparison, _noise
 from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections, _unquote
 from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
-from manishtana.llm import _manifest, analyze_changes
+from manishtana.llm import _manifest, analyze_changes, probe
 from manishtana.output import (
     _extract_risk,
     _mark_pair,
@@ -46,6 +46,7 @@ from manishtana.rules import (
     _quote_name,
     prepare_copy,
     skipped_files,
+    tool_status,
 )
 
 
@@ -193,6 +194,30 @@ class PrepareCopy(unittest.TestCase):
         prepare_copy(self.src, self.dst, [{"match": ["*.h"], "ignore_lines": [r"^#define BUILD"]}])
         with open(os.path.join(self.dst, "v.h"), "r", encoding="utf-8") as handle:
             self.assertEqual(handle.read().split("\n")[0], IGNORED_TOKEN)
+
+
+class ToolStatusOfTheRules(unittest.TestCase):
+    """What a preflight is allowed to say about the normalizers, before a run."""
+
+    def test_a_missing_program_carries_the_command_it_would_have_run(self):
+        settings = load_settings({"normalizers": {"clang-format": "no-such-tool-xyz {name}"}}, ".")
+        status = tool_status([{"match": ["*.c"], "normalize": ["clang-format"]}], settings)
+        self.assertEqual([item.step for item in status], ["clang-format"])
+        self.assertEqual(status[0].program, "no-such-tool-xyz")
+        self.assertFalse(status[0].available)
+
+    def test_each_step_is_reported_once_however_many_rules_use_it(self):
+        rules = [
+            {"match": ["*.c"], "normalize": ["json-sort"]},
+            {"match": ["*.h"], "normalize": ["json-sort"]},
+        ]
+        status = tool_status(rules)
+        self.assertEqual(len(status), 1)
+        # json-sort resolves to the running interpreter, so it is always present.
+        self.assertTrue(status[0].available)
+
+    def test_rules_with_no_normalize_step_report_nothing(self):
+        self.assertEqual(tool_status([{"match": ["*.o"], "skip": True}]), [])
 
 
 class ProgramOf(unittest.TestCase):
@@ -641,6 +666,18 @@ class AnalyzeChanges(unittest.TestCase):
         prompts = load_settings({"prompts": {"file_system": "MY-OWN-PROMPT"}}, ".").prompts
         analyze_changes(comparison(), chat, prompts=prompts)
         self.assertEqual(chat.calls[0]["system"], "MY-OWN-PROMPT")
+
+
+class Probe(unittest.TestCase):
+    """The endpoint check goes through the same seam the analysis does."""
+
+    def test_probe_returns_the_reply_and_labels_the_call(self):
+        chat = FakeChat("ok")
+        self.assertEqual(probe(chat), "ok")
+        self.assertEqual(chat.labels, ["endpoint check"])
+
+    def test_a_dead_endpoint_is_a_none_not_an_exception(self):
+        self.assertIsNone(probe(FakeChat(None)))
 
 
 # --- output ------------------------------------------------------------------
@@ -1171,6 +1208,74 @@ class CliArgs(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--commit", text)
         self.assertIn("--from", text)
+
+    def test_a_placeholder_model_stops_a_real_run_before_it_starts(self):
+        self._config({"llm": {"base_url": "http://localhost:8000/v1",
+                              "model": "PLACEHOLDER-MODEL-NAME"}})
+        report = os.path.join(self.work, "report.md")
+        code, text = self._main(self.work, self.work, "-c", self.config, "-o", report)
+        self.assertEqual(code, 2)
+        self.assertIn("PLACEHOLDER-MODEL-NAME", text)
+        self.assertIn("--no-llm", text)
+        self.assertFalse(os.path.exists(report))
+
+    def test_no_llm_lets_the_same_placeholder_config_through(self):
+        self._config({"llm": {"model": "PLACEHOLDER-MODEL-NAME"}})
+        code, text = self._main("--check", "--no-llm", "-c", self.config)
+        self.assertIn("not contacted", text)
+        self.assertNotIn("FAIL llm", text)
+
+
+class CliCheck(unittest.TestCase):
+    """--check: one command that says whether this box can run the tool.
+
+    These read the box -- git --version, and shutil.which for the normalizers --
+    which is the point of the command, so they assert only what is true whether
+    or not git is installed here. That git is present is not something a suite
+    that must pass on a bare target box may assume.
+    """
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.config = os.path.join(self.work, "config.json")
+
+    def _check(self, config, *extra):
+        with open(self.config, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["--check", "-c", self.config] + list(extra))
+        return code, out.getvalue() + err.getvalue()
+
+    def test_a_placeholder_model_is_a_failure_not_a_warning(self):
+        code, text = self._check({"llm": {"base_url": "http://localhost:8000/v1",
+                                          "model": "PLACEHOLDER-MODEL-NAME"}})
+        self.assertEqual(code, 2)
+        self.assertIn("FAIL llm", text)
+        self.assertIn("PLACEHOLDER-MODEL-NAME", text)
+
+    def test_one_command_reports_every_concern(self):
+        code, text = self._check({"rules": [{"match": ["*.c"], "normalize": ["json-sort"]}]},
+                                 "--no-llm")
+        for label in ("python", "git", "config", "prompts", "normalize:json-sort", "llm"):
+            self.assertIn(label, text)
+        self.assertEqual(code, 2 if "FAIL" in text else 0)
+
+    def test_a_missing_optional_normalizer_warns_and_does_not_fail(self):
+        code, text = self._check(
+            {"normalizers": {"clang-format": "no-such-tool-xyz {name}"},
+             "rules": [{"match": ["*.c"], "normalize": ["clang-format"]}]},
+            "--no-llm",
+        )
+        self.assertIn("warn normalize:clang-format", text)
+        self.assertIn("no-such-tool-xyz", text)
+        self.assertNotIn("FAIL normalize", text)
+        self.assertEqual(code, 2 if "FAIL" in text else 0)
+
+    def test_the_prompt_digest_is_shown_so_two_boxes_can_be_compared(self):
+        _code, text = self._check({}, "--no-llm")
+        self.assertIn("digest %s" % load_settings({}, self.work).digest[:12], text)
 
 
 if __name__ == "__main__":

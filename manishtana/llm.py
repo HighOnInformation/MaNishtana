@@ -3,6 +3,7 @@
 Public interface:
     http_chat(llm_config) -> chat
     analyze_changes(comparison, chat, ...) -> Analysis
+    probe(chat) -> str | None                 one minimal exchange, for a preflight
     Analysis                                  namedtuple(brief, analyses, summary)
 
 The seam is `chat`, a callable:
@@ -118,6 +119,22 @@ def analyze_changes(comparison, chat, prompts=None, xref=None, max_files=50, max
         )
 
     return Analysis(brief=brief, analyses=analyses, summary=summary)
+
+
+def probe(chat):
+    """Send the smallest possible exchange and return the reply, or None.
+
+    Takes a chat rather than an llm config so the endpoint check is exercised by
+    the same fake the analysis tests use, and so it cannot grow a second
+    transport beside http_chat. Failure detail already reaches the user: the
+    chat built by http_chat turns any transport error into a warning naming the
+    label below, then returns None.
+
+    Deliberately not a GET of /models: half of what can go wrong -- a wrong
+    model name, a proxy that answers but will not complete, a token the endpoint
+    rejects only on POST -- is invisible to anything but a real completion.
+    """
+    return chat("Reply with the single word: ok", "ok?", "endpoint check")
 
 
 # --- internals ---------------------------------------------------------------

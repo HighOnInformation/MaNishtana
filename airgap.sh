@@ -117,6 +117,13 @@ MaNishtana — importing on the closed network
 
        ./airgap.sh selftest
 
+   On a box with no bash — Windows — run the same check directly:
+
+       python -m manishtana --check --no-llm
+
+   Once llm.base_url and llm.model are set, drop --no-llm and it also
+   proves the endpoint answers.
+
 Running it
 ----------
 
@@ -213,9 +220,14 @@ do_selftest() {
         if [ -d "$root/tests" ]; then
             say "native suite"
             ( cd "$root" && "$py" -m unittest discover -s tests ) || failed=1
-            say "native tools"
-            "$py" --version
-            git --version || warn "git is missing — the comparison cannot run natively"
+            say "native preflight"
+            # The tool's own answer to "can this box run it": interpreter, git,
+            # the normalizers these rules need, the config and the prompts.
+            # Calling it rather than re-probing here is deliberate — two copies
+            # of this check would drift, and the shell copy has no Windows form.
+            # --no-llm because the endpoint is usually configured after import;
+            # re-run without it once llm.base_url and llm.model are real.
+            ( cd "$root" && "$py" -m manishtana --check --no-llm ) || failed=1
         else
             warn "no tests/ directory here — skipping the native suite"
         fi
@@ -225,6 +237,12 @@ do_selftest() {
         say "packaged suite, inside the image"
         docker run --rm --entrypoint python "$IMAGE" \
             -m unittest discover -s /opt/manishtana/tests || failed=1
+        say "packaged preflight, inside the image"
+        docker run --rm --entrypoint python "$IMAGE" \
+            -m manishtana --check --no-llm -c /opt/manishtana/config.json || failed=1
+        # Kept beside it on purpose: --check forgives a missing optional tool,
+        # because on a bare target that is normal. Inside the image it is not —
+        # the image exists to carry them, so their absence is a broken build.
         say "bundled tools"
         docker run --rm --entrypoint sh "$IMAGE" -c \
             'git --version && clang-format --version && gcc --version | head -1' || failed=1

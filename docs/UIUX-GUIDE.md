@@ -27,21 +27,23 @@ badges — which are regex-extracted from that prose, so they vanish without it.
 Prove the box before you need it. Each step catches a different failure.
 
 ```bash
-python3 --version                        # 3.8+
-git --version                            # 2.30+, needs diff --no-index
-python3 -m manishtana --help                # proves the package copied whole
-clang-format --version                   # optional normalizer
-gcc --version                            # optional, powers strip-comments
-python3 -m unittest discover -s tests    # 93 tests, no git or network needed
-python3 -m manishtana v1 v2 -c config.json -o /tmp/smoke.md --no-llm 2> /tmp/smoke.warn
+python3 -m unittest discover -s tests    # the suite, no git or network needed
+python3 -m manishtana --check -c config.json
 ```
 
-Read `/tmp/smoke.warn` first. If it names a missing tool, every later report will
-count formatting as substantive change — decide that knowingly, not by accident.
+`--check` is the box, in one command, in the order that matters: interpreter, git,
+the normalizers *these rules* actually name, the config, the prompt digest, and one
+real completion against `llm.base_url`. Every row is `ok`, `warn` or `FAIL`; exit 0
+means every **required** row passed, exit 2 that one did not. Add `--no-llm` before
+the endpoint exists and the last row becomes "not contacted".
 
-`git` is the one dependency with no graceful failure. `gitdiff.py::_git` does not
-catch `OSError`, so a missing git gives a traceback and exit 1, not a diagnostic.
-That is why `git --version` is step two.
+A `warn` row is the one to read slowly. `warn normalize:clang-format` means every
+later report will count formatting as substantive change — decide that knowingly,
+not by accident.
+
+It is the same command natively, inside the container and on Windows, which is the
+point: `airgap.sh selftest` calls it rather than re-probing in bash, and a Windows
+box has no bash to re-probe in.
 
 ### Flow B — routine review of a drop
 
@@ -92,8 +94,10 @@ sorted(d['real'],key=lambda f:{'high':0,'medium':1,'low':2}.get(f['risk'],3))))"
 ## 2. The command line as an interface
 
 ```
-usage: manishtana [-h] [-c CONFIG] [-o OUTPUT] [-H PATH] [-j PATH] [--no-llm]
-               DIR_A DIR_B
+usage: manishtana [-h] [-g REPO] [--commit REV] [--from REV] [--to REV]
+               [--intent-context] [-c CONFIG] [-o OUTPUT] [-H PATH] [-j PATH]
+               [--no-llm] [--check]
+               [DIR_A] [DIR_B]
 ```
 
 | Flag | Default | Why that default |
