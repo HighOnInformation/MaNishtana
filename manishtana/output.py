@@ -32,6 +32,18 @@ _RISK_ORDER = ["low", "medium", "high"]
 # Word boundaries matter: "allows" contains "low" and "below" contains "low".
 _RISK_RE = re.compile(r"\b(low|medium|high)\b")
 
+# Most sceptical last, so the same "worst wins" rule as risk applies.
+_CLAIM_ORDER = ["supported", "partly supported", "not supported"]
+
+# Anchored, unlike _RISK_RE, and that is the whole point: every verdict here ends
+# in the word "supported", so a search that can start anywhere reads "Not
+# supported" as "supported" and inverts the answer.
+_CLAIM_RE = re.compile(r"^[\s*_`]*(not supported|partly supported|supported)\b")
+
+# Unanchored, and used only to spot a line that echoes the whole template — which
+# the anchored pattern would otherwise read as a confident "Supported".
+_CLAIM_ANY_RE = re.compile(r"\b(not supported|partly supported|supported)\b")
+
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 # Which of these two the report prints is the difference between an independent
@@ -212,6 +224,9 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     return {
         # 2: added "commits" — the stated intent that came with a git range — and
         # "inputs.intent_shown", which says whether the model was allowed to see it.
+        # Pending: "summary.claim" is new and this number has not been bumped for
+        # it. Three proposals each planned to own version 3; the versioning rule is
+        # being settled separately and decides what this becomes.
         "schema_version": 2,
         "generated_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "dir_a": dir_a,
@@ -223,7 +238,14 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
             "skipped": len(comparison.skipped),
         },
         "brief": brief,
-        "summary": {"text": summary, "risk": _extract_risk(summary, summary_label)},
+        "summary": {
+            "text": summary,
+            "risk": _extract_risk(summary, summary_label),
+            # null whenever no claim was shown, and also whenever one was shown and
+            # the model did not answer in the required form. The consumer cannot
+            # tell those apart from this field alone — inputs.intent_shown does.
+            "claim": _extract_claim(summary, (risk or {}).get("claim_label", "Claim")),
+        },
         "cross_reference": dict(zip(("removed", "dangling"), _xref_parts(xref))),
         "inputs": {
             "prompts_sha256": settings.digest if settings else None,
@@ -681,5 +703,38 @@ def _extract_risk(text, label):
             continue
         level = found[0]
         if best is None or _RISK_ORDER.index(level) > _RISK_ORDER.index(best):
+            best = level
+    return best
+
+
+def _extract_claim(text, label):
+    """Pull the whole-change verdict out of the summary, or return None.
+
+    Same shape as `_extract_risk` — the label must introduce a field, a line that
+    echoes the template is rejected — with one deliberate difference. Every verdict
+    ends in the word "supported", so `_extract_risk`'s "first level named anywhere
+    after the label" rule would read "Not supported" as "supported" and invert the
+    answer. The verdict must therefore be the first words after the label, exactly
+    as `claim_block` asks. Anything else yields None, which a consumer reads as
+    "the model did not answer in the required form" — the safe direction for a
+    verdict that gates a patch.
+    """
+    if not text:
+        return None
+    field = re.compile(re.escape(label.lower()) + r"[*_`\s]*[:\-–—]")
+    best = None
+    for line in text.split("\n"):
+        lowered = line.lower()
+        match = field.search(lowered)
+        if match is None:
+            continue
+        rest = lowered[match.end():]
+        if len(set(_CLAIM_ANY_RE.findall(rest))) == len(_CLAIM_ORDER):
+            continue
+        verdict = _CLAIM_RE.match(rest)
+        if verdict is None:
+            continue
+        level = verdict.group(1)
+        if best is None or _CLAIM_ORDER.index(level) > _CLAIM_ORDER.index(best):
             best = level
     return best

@@ -24,6 +24,7 @@ from manishtana.gitdiff import _parse_name_status, _relativize, _split_sections,
 from manishtana.gitrepo import Commit, _is_within, _parse_log, intent_text
 from manishtana.llm import _manifest, analyze_changes
 from manishtana.output import (
+    _extract_claim,
     _extract_risk,
     _mark_pair,
     _side_by_side,
@@ -1052,6 +1053,51 @@ class IntentInAnalysis(unittest.TestCase):
         analyze_changes(comparison(), chat, xref=None, intent="Bound the parser.")
         self.assertIn("Bound the parser.", chat.calls[0]["user"])
         self.assertIn("claim to verify", chat.calls[0]["user"])
+
+
+class ClaimVerdict(unittest.TestCase):
+    """The spike: the claim reaches the summary, and the verdict comes back out."""
+
+    def _summary_call(self, **kwargs):
+        chat = FakeChat()
+        real = {"a.c": ("M", []), "b.c": ("M", [])}
+        analyze_changes(comparison(real=real), chat, **kwargs)
+        self.assertEqual(chat.calls[-1]["label"], "executive summary")
+        return chat.calls[-1]["user"]
+
+    def test_the_summary_sees_the_claim_when_intent_is_supplied(self):
+        user = self._summary_call(intent="Fixes CVE-1234, a heap overflow.")
+        self.assertIn("Fixes CVE-1234", user)
+        self.assertIn("**Claim**", user)
+
+    def test_the_summary_is_never_asked_about_a_claim_it_was_not_given(self):
+        user = self._summary_call()
+        self.assertNotIn("CVE-1234", user)
+        self.assertNotIn("**Claim**", user)
+
+    def test_a_verdict_round_trips_into_the_json(self):
+        text = "**Overall risk** — Low, small.\n**Claim** — Not supported, only comments."
+        payload = build_json("v1", "v2", comparison(), {}, text, intent_shown=True)
+        self.assertEqual(payload["summary"]["claim"], "not supported")
+        self.assertEqual(payload["summary"]["risk"], "low")
+        self.assertTrue(payload["inputs"]["intent_shown"])
+
+    def test_no_claim_line_leaves_the_field_null(self):
+        payload = build_json("v1", "v2", comparison(), {}, "**Overall risk** — Low.")
+        self.assertIsNone(payload["summary"]["claim"])
+
+    def test_not_supported_is_never_read_as_supported(self):
+        # Every verdict ends in "supported", so an unanchored search inverts the
+        # answer. Only the anchored form counts; anything else fails closed.
+        cases = [
+            ("**Claim** — Not supported, no test.", "not supported"),
+            ("**Claim**: Partly supported, one of two.", "partly supported"),
+            ("**Claim** — Supported / Partly supported / Not supported", None),
+            ("The fix is not supported by any test.", None),
+            ("**Claim** — Partially supported.", None),
+        ]
+        for text, expected in cases:
+            self.assertEqual(_extract_claim(text, "Claim"), expected, text)
 
 
 class CommitsInOutput(unittest.TestCase):

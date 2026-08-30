@@ -20,7 +20,9 @@ Two rules make this safe rather than merely flexible:
 
 The risk labels live here beside the prompts on purpose. `_extract_risk` looks for
 the literal label the prompt asks the model to write; translating one without the
-other makes every badge silently disappear. They are one coupled input.
+other makes every badge silently disappear. They are one coupled input. The claim
+label sits in the same block for the same reason: `claim_block` asks for it and
+`_extract_claim` reads it back.
 """
 
 import collections
@@ -86,8 +88,11 @@ _PLACEHOLDERS = {
     "part_user": ({"path", "diff", "context", "part", "parts"}, {"diff"}),
     "context_block": ({"brief"}, {"brief"}),
     "intent_block": ({"intent"}, {"intent"}),
+    "claim_block": ({"intent"}, {"intent"}),
     "summary_system": (set(), set()),
-    "summary_user": ({"manifest", "analyses"}, {"analyses"}),
+    # {intent} is allowed but not required: a config that overrode summary_user
+    # before the claim verdict existed has no slot for it and must keep loading.
+    "summary_user": ({"manifest", "analyses", "intent"}, {"analyses"}),
     "summary_item": ({"path", "analysis"}, {"analysis"}),
 }
 
@@ -106,14 +111,27 @@ _DEFAULT_PROMPTS = {
         "against the code, not as established fact — say so if the diff does not "
         "support it.\n\n{intent}\n\n"
     ),
+    # The claim reaches the summary and only the summary: "this fixes CVE-1234" is
+    # a statement about the whole change, and the summary is the one pass that sees
+    # it whole. The request for the verdict line travels WITH the claim, so a run
+    # that was given no claim is never asked to adjudicate one.
+    "claim_block": (
+        "The author describes the whole change as follows. Treat it as a claim to "
+        "adjudicate against the code, not as established fact.\n\n{intent}\n\n"
+        "End with a separate line in this exact format:\n\n"
+        "**Claim** — Supported, Partly supported or Not supported, followed by "
+        "one sentence naming the evidence in the diff. Write the verdict as the "
+        "first words after the dash and nothing else there.\n\n"
+    ),
     "summary_system": _SUMMARY_SYSTEM,
-    "summary_user": "{manifest}\n\n{analyses}",
+    "summary_user": "{intent}{manifest}\n\n{analyses}",
     "summary_item": "## {path}\n{analysis}",
 }
 
 _DEFAULT_RISK = {
     "file_label": "Risk",
     "summary_label": "Overall risk",
+    "claim_label": "Claim",
     "levels": ["low", "medium", "high"],
 }
 

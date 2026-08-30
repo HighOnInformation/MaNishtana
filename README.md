@@ -339,8 +339,10 @@ prose stays reviewable Markdown instead of JSON escapes.
 | `file_user` | **`{diff}`**, `{path}`, `{context}` |
 | `part_user` | **`{diff}`**, `{path}`, `{context}`, `{part}`, `{parts}` |
 | `context_block` | **`{brief}`** — how pass 0's output is introduced to pass 1 |
+| `intent_block` | **`{intent}`** — how the author's account is put to the per-file pass |
+| `claim_block` | **`{intent}`** — the same account put to the summary, plus the request for the `**Claim**` line. Used only with `--intent-context` |
 | `summary_system` | none |
-| `summary_user` | **`{analyses}`**, `{manifest}` |
+| `summary_user` | **`{analyses}`**, `{manifest}`, `{intent}` |
 | `summary_item` | **`{analysis}`**, `{path}` |
 
 Placeholders are validated at load: an unknown one, a missing required one, or a
@@ -349,13 +351,13 @@ typo'd key is a startup error with exit 2 — never a silently mangled prompt.
 ### `risk` — the labels extraction looks for
 
 ```json
-"risk": { "file_label": "Risk", "summary_label": "Overall risk" }
+"risk": { "file_label": "Risk", "summary_label": "Overall risk", "claim_label": "Claim" }
 ```
 
 **These must move with the prompts.** The extractor looks for the literal label the
 prompt asks the model to write, so translating a prompt without changing the label
 makes every risk badge silently disappear. They are one coupled input, which is why
-they sit together.
+they sit together. `claim_label` is the same coupling for `claim_block`.
 
 ### `normalizers` and `tuning`
 
@@ -397,6 +399,14 @@ The JSON carries `brief`, `summary`, `counts`, `cross_reference` (`removed` and
 `dangling`), `inputs.prompts_sha256` — a fingerprint of the exact prompt set used,
 so a report is traceable to what produced it — and per-file `risk`, `analysis` and
 `diff`.
+
+`summary.claim` is the machine-readable verdict on what the commit messages claim:
+`"supported"`, `"partly supported"`, `"not supported"`, or `null`. It is only ever
+non-null with `--intent-context`, and `null` there means the model did not answer
+in the required form — never read a missing verdict as a passing one. Read it
+together with `inputs.intent_shown`: a verdict exists only because the model was
+shown the claim, so see [`docs/proposals/claim-verdict.md`](docs/proposals/claim-verdict.md)
+for what that costs it.
 
 **`risk` and `analysis` are genuinely nullable.** Binaries are never analysed, a
 dead endpoint yields nothing, and files past `max_files` get no prose. Combined
