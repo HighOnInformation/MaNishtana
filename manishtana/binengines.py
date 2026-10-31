@@ -42,6 +42,7 @@ import collections
 import difflib
 import glob
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -719,7 +720,8 @@ def _read_ghidriff(pdiff):
 def _merge(found):
     """One entry per function across engines, with each engine's view kept.
 
-    Keyed by the old name, else the new one. An engine that ran and does not list a
+    Keyed by the old name, else the new one, with disassembler default names
+    reduced to their address (see _merge_key). An engine that ran and does not list a
     function matched it as identical, so its view is "unchanged" — that is what
     makes a disagreement visible. The merged status is the first engine's (in
     ENGINES order) that saw a change; similarity is the lowest any engine gave,
@@ -729,7 +731,7 @@ def _merge(found):
     ran = [name for name in ENGINES if name in found]
     for engine in ran:
         for change in found[engine]:
-            key = change.name_a or change.name_b
+            key = _merge_key(change.name_a or change.name_b)
             current = merged.get(key)
             if current is None:
                 merged[key] = change._replace(views=dict(change.views))
@@ -752,6 +754,17 @@ def _merge(found):
                                c.similarity if c.similarity is not None else 0.0,
                                c.name_a or c.name_b or ""))
     return result
+
+
+# Default names for functions without a symbol: IDA and BinExport write
+# sub_14007D650, Ghidra writes FUN_14007d650. The same function, so for merging
+# they are the address they encode.
+_DEFAULT_NAME = re.compile(r"^(?:sub|FUN)_([0-9A-Fa-f]+)$")
+
+
+def _merge_key(name):
+    match = _DEFAULT_NAME.match(name or "")
+    return int(match.group(1), 16) if match else name
 
 
 _ADAPTERS = {

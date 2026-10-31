@@ -989,5 +989,27 @@ class ThreeEngines(GhidriffSetup):
         self.assertEqual(set(fresh.views.values()), {"added"})
 
 
+class MergeKeys(unittest.TestCase):
+    def test_ida_and_ghidra_default_names_are_one_function(self):
+        merged = _merge({
+            "bindiff": [FunctionChange("sub_14007D650", None, "removed", None,
+                                       {"bindiff": "removed"}, None)],
+            "ghidriff": [FunctionChange("FUN_14007d650", None, "removed", None,
+                                        {"ghidriff": "removed"}, "--- a/FUN_14007d650\n")],
+        })
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].views, {"bindiff": "removed", "ghidriff": "removed"})
+        self.assertIsNotNone(merged[0].pseudo_diff)
+
+    def test_real_names_are_not_folded(self):
+        merged = _merge({
+            "bindiff": [FunctionChange("sub_parser", None, "removed", None,
+                                       {"bindiff": "removed"}, None)],
+            "ghidriff": [FunctionChange("FUN_parser", None, "removed", None,
+                                        {"ghidriff": "removed"}, None)],
+        })
+        self.assertEqual(len(merged), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
