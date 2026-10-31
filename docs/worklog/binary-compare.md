@@ -569,3 +569,38 @@ address instead of function name.
 - Honest scale: the measured improvement on this pair is one row. Address keying
   matters most when engines name *real* symbols differently, for example Diaphora
   with IDA's names against Ghidra's. That case could not be measured without IDA.
+
+#### Stage 6, review fixes
+
+A separate review agent read `34a4c72` cold and reproduced four problems. All are
+fixed in the commit after this worklog entry's predecessor, `Fix the address merge
+found by review`.
+
+1. **Folding dropped the new function's code.** The folded row kept X's
+   "entirely removed" diff and discarded Y's. `_fold_diff` now rebuilds old → new
+   from the two one-sided diffs, or keeps a real modification diff when one exists.
+2. **A folded row could have status "removed".** This happened when the
+   removed+added engine came first in `ENGINES`. A fold now always sets
+   `modified`.
+3. **The fold overwrote an engine's "unchanged".** An engine that never mentioned
+   X matched it as identical elsewhere, so to it X and Y are two functions. The
+   fold now requires every engine behind the "added" to have reported X as
+   removed.
+4. **The engines' address spaces differed for ELF shared objects and PIEs.**
+   Ghidra rebases a zero-based `ET_DYN` to 0x100000 and IDA does not. Two
+   different functions could then share a key and be merged, which hides a change.
+   - Verified on a real file: Ghidra's sample `override.so` reports `ELF Original
+     Image Base 0x0` and `Minimum Address 00100000` in ghidriff's metadata.
+   - `_ghidra_rebase(path)` gives 0x100000 for exactly that case, and the
+     Ghidra-based adapters (ghidriff, and BinDiff when it exports through Ghidra)
+     subtract it.
+   - Guard: findings at one address with different real symbol names are never
+     merged (`_names_conflict`).
+
+Also: BinDiff addresses at or above 2**63 come back from SQLite negative; they are
+masked to unsigned.
+
+Tests: `MergeReviewRegressions`, `GhidraRebase`, `BinDiffHighAddresses`. The
+reviewer's own script, pointed at the fixed code, shows every case behaving.
+**[Decided]** The rebase covers only `ET_DYN` with lowest load address 0, the
+verified case. Relocatable `.o` files are not rebased.

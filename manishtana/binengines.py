@@ -54,10 +54,14 @@ import tempfile
 
 ENGINES = ("diaphora", "bindiff", "ghidriff")
 
-# Addresses are the function's entry point in the old (a) and new (b) binary, as
-# the engine reports it. All three engines report the loaded virtual address, so
-# the same function has the same address whichever engine found it; that is what
-# lets findings merge even when the engines name a function differently.
+# Addresses are the function's entry point in the old (a) and new (b) binary, in
+# one coordinate system for all engines: the virtual address the file itself
+# declares. IDA uses it as is. Ghidra does too, except for an ELF shared object
+# or PIE whose lowest load address is 0, which it rebases to 0x100000 (verified
+# on Ghidra 12.2: "ELF Original Image Base 0x0", "Minimum Address 00100000");
+# the Ghidra-based adapters subtract that again (_ghidra_rebase). Without it the
+# same function would sit at two addresses, and two different functions could
+# share one.
 FunctionChange = collections.namedtuple(
     "FunctionChange", "name_a name_b status similarity views pseudo_diff address_a address_b",
     defaults=(None, None),
@@ -383,6 +387,47 @@ def _run(argv, cwd, env, timeout):
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
 
 
+_GHIDRA_ELF_BASE = 0x100000
+
+
+def _ghidra_rebase(path):
+    """How far Ghidra moves this file's addresses: 0x100000 for a zero-based ELF
+    ET_DYN (shared object or PIE), else 0. Reads only the ELF and program headers.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(1 << 16)
+        if data[:4] != b"\x7fELF" or data[4] not in (1, 2) or data[5] not in (1, 2):
+            return 0
+        end = "<" if data[5] == 1 else ">"
+        wide = data[4] == 2
+        e_type, = struct.unpack_from(end + "H", data, 16)
+        if e_type != 3:
+            return 0
+        if wide:
+            phoff, = struct.unpack_from(end + "Q", data, 0x20)
+            phentsize, phnum = struct.unpack_from(end + "HH", data, 0x36)
+        else:
+            phoff, = struct.unpack_from(end + "I", data, 0x1C)
+            phentsize, phnum = struct.unpack_from(end + "HH", data, 0x2A)
+        lowest = None
+        for index in range(phnum):
+            at = phoff + index * phentsize
+            kind, = struct.unpack_from(end + "I", data, at)
+            if kind != 1:                                   # PT_LOAD
+                continue
+            vaddr, = struct.unpack_from(end + ("Q" if wide else "I"), data,
+                                        at + (16 if wide else 8))
+            lowest = vaddr if lowest is None else min(lowest, vaddr)
+        return _GHIDRA_ELF_BASE if lowest == 0 else 0
+    except (OSError, struct.error):
+        return 0
+
+
+def _shift(address, delta):
+    return None if address is None or not delta else address - delta
+
+
 def _env_for(tools, ghidra=False):
     env = dict(os.environ)
     if ghidra and tools.get("java"):
@@ -568,7 +613,14 @@ def _bindiff(old, new, tools, run, work, timeout):
     if code != 0 or not results:
         return None, "bindiff: matching failed (%s) %s" % (
             "exit %s" % code if code is not None else output, _tail(output))
-    return _read_bindiff(results[0], exports["old"], exports["new"]), None
+    changes = _read_bindiff(results[0], exports["old"], exports["new"])
+    if not use_ida:
+        old_delta, new_delta = _ghidra_rebase(old), _ghidra_rebase(new)
+        changes = [c._replace(address_a=_shift(c.address_a, old_delta) if old_delta
+                              else c.address_a,
+                              address_b=_shift(c.address_b, new_delta) if new_delta
+                              else c.address_b) for c in changes]
+    return changes, None
 
 
 def _read_bindiff(result, export_old, export_new):
@@ -583,14 +635,18 @@ def _read_bindiff(result, export_old, export_new):
     funcs_new = _binexport_functions(export_new)
     changes = []
     for address1, name1, address2, name2, similarity in rows:
+        # SQLite integers are signed 64-bit: an address at or above 2**63 (a kernel
+        # address) comes back negative and would match nothing.
+        address1 &= 0xFFFFFFFFFFFFFFFF
+        address2 &= 0xFFFFFFFFFFFFFFFF
         similarity = float(similarity)
         if similarity >= 1.0:
             continue
         changes.append(FunctionChange(funcs_old.get(address1, name1), funcs_new.get(address2, name2),
                                       "modified", similarity, {"bindiff": "modified"}, None,
                                       address1, address2))
-    matched_old = set(row[0] for row in rows)
-    matched_new = set(row[2] for row in rows)
+    matched_old = set(row[0] & 0xFFFFFFFFFFFFFFFF for row in rows)
+    matched_new = set(row[2] & 0xFFFFFFFFFFFFFFFF for row in rows)
     for address, name in sorted(funcs_old.items()):
         if address not in matched_old:
             changes.append(FunctionChange(name, None, "removed", None, {"bindiff": "removed"},
@@ -691,7 +747,14 @@ def _ghidriff(old, new, tools, run, work, timeout):
         return None, "ghidriff failed (%s) %s" % (
             "exit %s" % code if code is not None else output, _tail(output))
     with open(results[0], "r", encoding="utf-8") as handle:
-        return _read_ghidriff(json.load(handle)), None
+        changes = _read_ghidriff(json.load(handle))
+    old_delta, new_delta = _ghidra_rebase(old), _ghidra_rebase(new)
+    if old_delta or new_delta:
+        changes = [c._replace(address_a=_shift(c.address_a, old_delta) if old_delta
+                              else c.address_a,
+                              address_b=_shift(c.address_b, new_delta) if new_delta
+                              else c.address_b) for c in changes]
+    return changes, None
 
 
 def _read_ghidriff(pdiff):
@@ -737,13 +800,19 @@ def _read_ghidriff(pdiff):
 def _merge(found):
     """One entry per function across engines, with each engine's view kept.
 
-    Two passes. First, findings are keyed by the function's old address (else its
-    new address, else its name; see _merge_key), so engines that name a function
-    differently still meet. Second, an entry known only on the new side ("added")
-    folds into an entry whose new address is the same: one engine saw a function
-    appear at Y where another saw an old function change and land at Y. That is
-    one function the engines read differently, not two functions; one row with
-    both views is what the reviewer needs.
+    Pass 1 keys findings by the function's old address (else its new address,
+    else its name; see _merge_key), so engines that name a function differently
+    still meet. If both sides of a would-be merge carry real symbol names that
+    differ, they are different functions sharing an address (something is wrong
+    with the addresses), and the newcomer is keyed by its name instead: merging
+    them would put one function's verdict on another's row and hide a change.
+
+    Pass 2 folds an "added at Y" into an entry for X -> Y, but only when every
+    engine behind the "added" also reported X as removed: that engine read one
+    function as removed-then-added (its view becomes "removed+added"), and the
+    row is a modification. An engine that never mentioned X matched X as
+    identical to something, so to it X and Y are two functions; then nothing is
+    folded and both rows stay.
 
     An engine that ran and does not list a function matched it as identical, so
     its view is "unchanged" — that is what makes a disagreement visible. The
@@ -756,6 +825,9 @@ def _merge(found):
         for change in found[engine]:
             key = _merge_key(change)
             current = merged.get(key)
+            if current is not None and _names_conflict(current, change):
+                key = ("n", change.name_a or change.name_b)
+                current = merged.get(key)
             merged[key] = (change._replace(views=dict(change.views)) if current is None
                            else _combine(current, change))
 
@@ -771,17 +843,15 @@ def _merge(found):
         if target is None or target == key:
             continue
         target_views = merged[target].views
-        common = set(change.views) & set(target_views)
-        # An engine that already placed something at Y (modified X->Y, or added Y)
-        # is saying these are two functions. One whose only view so far is
-        # "removed at X" read the same function as removed-then-added.
-        if any(target_views[engine] != "removed" for engine in common):
+        if not all(target_views.get(engine) == "removed" for engine in change.views):
             continue
-        combined = _combine(merged[target], change)
-        views = dict(combined.views)
-        for engine in common:
+        folded = _combine(merged[target], change)
+        views = dict(folded.views)
+        for engine in change.views:
             views[engine] = "removed+added"
-        merged[target] = combined._replace(views=views)
+        merged[target] = folded._replace(
+            status="modified", views=views,
+            pseudo_diff=_fold_diff(merged[target], change))
         del merged[key]
 
     result = []
@@ -792,6 +862,47 @@ def _merge(found):
                                c.similarity if c.similarity is not None else 0.0,
                                c.name_a or c.name_b or ""))
     return result
+
+
+def _names_conflict(current, change):
+    """True when both carry real (non-default) names on the same side that differ."""
+    for mine, theirs in ((current.name_a, change.name_a), (current.name_b, change.name_b)):
+        if (mine and theirs and mine != theirs
+                and not _DEFAULT_NAME.match(mine) and not _DEFAULT_NAME.match(theirs)):
+            return True
+    return False
+
+
+def _fold_diff(target, added):
+    """The pseudo-code diff for a folded row: old code -> new code where possible.
+
+    The target may already hold a real modification diff (from an engine that saw
+    X -> Y); keep it. If all it holds is X shown as entirely deleted, and the
+    folded entry shows Y as entirely added, put the two sides together so the
+    reviewer sees what X became instead of only what it was.
+    """
+    old_text = _one_side(target.pseudo_diff, "-")
+    new_text = _one_side(added.pseudo_diff, "+")
+    if old_text is not None and new_text is not None:
+        return _unified(target.name_a, added.name_b or target.name_b, old_text, new_text)
+    return target.pseudo_diff or added.pseudo_diff
+
+
+def _one_side(diff, sign):
+    """The text of a diff that only removes (sign "-") or only adds ("+"), else None."""
+    if not diff:
+        return None
+    other = "+" if sign == "-" else "-"
+    lines = []
+    for line in diff.splitlines(True):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if line.startswith(other) or line.startswith(" "):
+            return None
+        if line.startswith(sign):
+            text = line[1:]
+            lines.append(text if text.endswith("\n") else text + "\n")
+    return "".join(lines)
 
 
 def _combine(current, change):

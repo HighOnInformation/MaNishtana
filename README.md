@@ -390,7 +390,14 @@ function `sub_401000`, Ghidra `FUN_00401000`, and a real symbol may be named
 differently again. When one engine says a function changed and moved from X to
 Y while another says something was added at Y, that is shown as one function
 read two ways (the second engine's view is `removed+added` when it also reported
-X as removed), not as two unrelated rows.
+X as removed), not as two unrelated rows. That fold happens only when the engine
+behind the "added" also reported X removed; an engine that matched X elsewhere
+is saying they are two functions, and both rows stay.
+
+Addresses are put in one coordinate system first: Ghidra moves a zero-based ELF
+shared object or PIE to 0x100000 where IDA keeps 0, and the Ghidra-based engines'
+addresses are moved back. As a last guard, two findings at one address that carry
+different real symbol names are never merged.
 
 In the report, functions the engines disagree on come first, in their own table
 (**look here first**), followed by the ones they agree on. Every row has the
