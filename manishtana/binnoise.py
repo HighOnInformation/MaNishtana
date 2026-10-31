@@ -1,8 +1,8 @@
 """Layer 1 of binary comparison: tell a rebuild from a change, with no tools.
 
 Public interface:
-    normalize(data) -> (bytes, format)      build-noise fields set to zero
-    summarize(path_a, path_b) -> BinarySummary
+    normalize(data, ignore_strings=None) -> (bytes, format)   build noise set to zero
+    summarize(path_a, path_b, ignore_strings=None) -> BinarySummary
     BinarySummary   namedtuple(format, size_a, size_b, sha_a, sha_b,
                                regions, regions_total, strings_added,
                                strings_removed, strings_added_total,
@@ -17,6 +17,13 @@ Only fields that are noise by construction are touched, and only in formats this
 module can parse with certainty (PE and ELF). Anything malformed or unknown is
 returned unchanged with format None: guessing at an unknown layout could erase a
 real difference, which is the one mistake this tool must not make.
+
+`ignore_strings` is the binary counterpart of a rule's `ignore_lines`: regexes the
+user declares for build-specific text (version stamps, __DATE__/__TIME__, build
+paths). Each match inside a printable string is zeroed on both sides. In PE and
+ELF files, strings that lie in executable sections are never touched: there a
+"string" is instruction bytes that happen to be printable, and zeroing them could
+hide a real code change.
 
 `summarize` describes what is left for a binary that still differs. Standard
 library only, as everywhere in this package.
@@ -46,24 +53,42 @@ _DEBUG_REPRO = 16
 
 # ELF
 _SHT_NOTE = 7
+_SHT_NOBITS = 8
+_SHF_EXECINSTR = 0x4
+_PT_LOAD = 1
 _PT_NOTE = 4
+_PF_X = 0x1
 _NT_GNU_BUILD_ID = 3
 
+# PE section characteristics
+_SCN_CNT_CODE = 0x20
+_SCN_MEM_EXECUTE = 0x20000000
 
-def normalize(data):
-    """Return (data with build-noise zeroed, "pe" | "elf" | None)."""
+# Candidate strings for ignore_strings: printable runs of 4+, the shortest a
+# version or date fragment can usefully be.
+_RUN_RE = re.compile(rb"[\x20-\x7e]{4,}")
+
+
+def normalize(data, ignore_strings=None):
+    """Return (data with build noise zeroed, "pe" | "elf" | None).
+
+    `ignore_strings` is a list of regexes (str); see the module docstring.
+    """
     buf = bytearray(data)
+    fmt = None
     try:
         if buf[:2] == b"MZ" and _pe(buf):
-            return bytes(buf), "pe"
-        if buf[:4] == b"\x7fELF" and _elf(buf):
-            return bytes(buf), "elf"
+            fmt = "pe"
+        elif buf[:4] == b"\x7fELF" and _elf(buf):
+            fmt = "elf"
     except (struct.error, IndexError, ValueError):
-        pass
-    return bytes(data), None
+        buf, fmt = bytearray(data), None
+    if ignore_strings:
+        _ignore_strings(buf, fmt, ignore_strings)
+    return bytes(buf), fmt
 
 
-def summarize(path_a, path_b):
+def summarize(path_a, path_b, ignore_strings=None):
     """Describe how two binaries differ. Either path may be None (added/deleted).
 
     The hashes identify the files as they are; the regions are found on the
@@ -76,7 +101,8 @@ def summarize(path_a, path_b):
 
     regions, total = [], 0
     if data_a is not None and data_b is not None:
-        regions, total = _regions(normalize(data_a)[0], normalize(data_b)[0])
+        regions, total = _regions(normalize(data_a, ignore_strings)[0],
+                                  normalize(data_b, ignore_strings)[0])
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
@@ -142,10 +168,86 @@ def _pe(buf):
                 if not raw or raw + data_size > len(buf):
                     continue
                 if kind == _DEBUG_CODEVIEW and buf[raw:raw + 4] == b"RSDS":
-                    _zero(buf, raw + 4, 20)                    # GUID + age
+                    # GUID, age, and the PDB path: the path is wherever the
+                    # build ran, so two builds in two directories differ there.
+                    _zero(buf, raw + 4, data_size - 4)
                 elif kind == _DEBUG_REPRO:
                     _zero(buf, raw, data_size)                 # the reproducible-build hash
     return True
+
+
+def _ignore_strings(buf, fmt, patterns):
+    """Zero every match of the patterns inside printable runs, outside code."""
+    regexes = [re.compile(p.encode("utf-8")) for p in patterns]
+    try:
+        code = _code_ranges(buf, fmt)
+    except (struct.error, IndexError, ValueError):
+        code = [(0, len(buf))]       # cannot tell code from data: touch nothing
+    for run in _RUN_RE.finditer(buf):
+        start, stop = run.span()
+        if any(start < hi and lo < stop for lo, hi in code):
+            continue
+        for regex in regexes:
+            for match in regex.finditer(buf, start, stop):
+                _zero(buf, match.start(), match.end() - match.start())
+
+
+def _code_ranges(buf, fmt):
+    """File ranges holding executable code, [] for a format that has none known.
+
+    ELF prefers section headers (precise); without them it falls back to
+    executable PT_LOAD segments, which also cover read-only data in older
+    layouts — conservative, it only means fewer strings are eligible.
+    """
+    if fmt == "pe":
+        pe = _u32(buf, 0x3C)
+        count = _u16(buf, pe + 6)
+        table = pe + 24 + _u16(buf, pe + 20)
+        ranges = []
+        for index in range(count):
+            at = table + index * 40
+            raw_size, raw_off = struct.unpack_from("<II", buf, at + 16)
+            flags = _u32(buf, at + 36)
+            if flags & (_SCN_MEM_EXECUTE | _SCN_CNT_CODE):
+                ranges.append((raw_off, raw_off + raw_size))
+        return ranges
+    if fmt == "elf":
+        end = "<" if buf[5] == 1 else ">"
+        wide = buf[4] == 2
+        if wide:
+            phoff, shoff = struct.unpack_from(end + "QQ", buf, 0x20)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(end + "HHHH", buf, 0x36)
+        else:
+            phoff, shoff = struct.unpack_from(end + "II", buf, 0x1C)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(end + "HHHH", buf, 0x2A)
+        ranges = []
+        if shoff and shnum:
+            for index in range(shnum):
+                at = shoff + index * shentsize
+                if wide:
+                    kind, = struct.unpack_from(end + "I", buf, at + 4)
+                    flags, = struct.unpack_from(end + "Q", buf, at + 8)
+                    offset, size = struct.unpack_from(end + "QQ", buf, at + 24)
+                else:
+                    kind, flags = struct.unpack_from(end + "II", buf, at + 4)
+                    offset, size = struct.unpack_from(end + "II", buf, at + 16)
+                if flags & _SHF_EXECINSTR and kind != _SHT_NOBITS:
+                    ranges.append((offset, offset + size))
+            return ranges
+        for index in range(phnum):
+            at = phoff + index * phentsize
+            if wide:
+                kind, flags = struct.unpack_from(end + "II", buf, at)
+                offset, = struct.unpack_from(end + "Q", buf, at + 8)
+                size, = struct.unpack_from(end + "Q", buf, at + 32)
+            else:
+                kind, offset = struct.unpack_from(end + "II", buf, at)
+                size, = struct.unpack_from(end + "I", buf, at + 16)
+                flags, = struct.unpack_from(end + "I", buf, at + 24)
+            if kind == _PT_LOAD and flags & _PF_X:
+                ranges.append((offset, offset + size))
+        return ranges
+    return []
 
 
 def _pe_sections(buf, table, count):

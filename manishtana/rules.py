@@ -3,13 +3,17 @@
 Public interface:
     IGNORED_TOKEN                       the marker left behind by ignore_lines
     BINARY_STEP                         the built-in normalize step for binaries
+    binary_ignore_strings(rules, rel)   the ignore_strings a binary's rule declares
     is_binary(path) -> bool
     skipped_files(rules, paths) -> set  paths matched by a skip rule
     prepare_copy(src, dst, rules)       copy a tree and apply the rules to the copy
 
 A rule is a plain dict from the config file:
 
-    {"match": [...], "skip": bool, "normalize": [...], "ignore_lines": [...]}
+    {"match": [...], "skip": bool, "normalize": [...], "ignore_lines": [...],
+     "ignore_strings": [...]}
+
+ignore_strings is for binaries and takes effect with the BINARY_STEP step.
 
 How normalizers are spawned, how missing binaries are tolerated, and how lines are
 neutralised are all internal. Callers only ever ask for a prepared copy.
@@ -56,6 +60,18 @@ def is_binary(path):
         return False
 
 
+def binary_ignore_strings(rules, rel):
+    """The ignore_strings that apply to a binary at rel ([] when none do).
+
+    Only a rule that lists BINARY_STEP rewrites binaries, so only its
+    ignore_strings count; that is the one place they are documented to work.
+    """
+    rule = _matching_rule(rules, rel)
+    if not rule or BINARY_STEP not in (rule.get("normalize") or []):
+        return []
+    return list(rule.get("ignore_strings") or [])
+
+
 def skipped_files(rules, paths):
     """Return the subset of paths whose matching rule says skip."""
     result = set()
@@ -94,7 +110,7 @@ def prepare_copy(src, dst, rules, settings=None):
             steps = rule.get("normalize") or []
             if is_binary(path):
                 if BINARY_STEP in steps:
-                    _rewrite_binary(path, rel)
+                    _rewrite_binary(path, rel, rule.get("ignore_strings") or [])
                 continue
             steps = [step for step in steps if step != BINARY_STEP]
             patterns = rule.get("ignore_lines") or []
@@ -128,13 +144,17 @@ def prepare_copy(src, dst, rules, settings=None):
 # --- internals ---------------------------------------------------------------
 
 
-def _rewrite_binary(path, rel):
-    """Zero a binary copy's build-noise fields. Unknown formats stay as they are."""
+def _rewrite_binary(path, rel, ignore_strings=()):
+    """Zero a binary copy's build-noise fields and any ignore_strings matches.
+
+    An unknown format gets no field zeroing, but the user's ignore_strings still
+    apply to it: they were declared for exactly these files.
+    """
     try:
         with open(path, "rb") as handle:
             data = handle.read()
-        cleaned, fmt = _normalize_binary(data)
-        if fmt is None or cleaned == data:
+        cleaned, _fmt = _normalize_binary(data, ignore_strings)
+        if cleaned == data:
             return
         with open(path, "wb") as handle:
             handle.write(cleaned)

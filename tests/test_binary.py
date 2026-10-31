@@ -37,7 +37,7 @@ from manishtana.binnoise import BinarySummary, normalize, summarize
 from manishtana.cli import main
 from manishtana.compare import Comparison, binary_pairs
 from manishtana.output import build_html, build_json, build_report
-from manishtana.rules import BINARY_STEP, prepare_copy
+from manishtana.rules import BINARY_STEP, binary_ignore_strings, prepare_copy
 from manishtana.settings import load as load_settings
 
 
@@ -49,9 +49,12 @@ SECTION_VA = 0x1000      # its virtual address
 
 
 def make_pe(stamp=0x11111111, checksum=0x22222222, guid=b"G" * 16, age=7,
-            repro=b"R" * 32, export_stamp=0x33333333, code=b"\x90" * 16):
+            repro=b"R" * 32, export_stamp=0x33333333, code=b"\x90" * 16,
+            text=b"", section_flags=0):
     """A PE32+ with a debug directory (CodeView + REPRO) and an export directory.
 
+    `text` is placed at offsets["text"] inside the one section, whose
+    Characteristics are `section_flags` (0 = data; 0x60000020 = code).
     Returns (bytes, offsets) where offsets names where each noise field lives.
     """
     buf = bytearray(0x400)
@@ -75,6 +78,9 @@ def make_pe(stamp=0x11111111, checksum=0x22222222, guid=b"G" * 16, age=7,
     table = opt + opt_size
     buf[table:table + 8] = b".text\x00\x00\x00"
     struct.pack_into("<IIII", buf, table + 8, 0x200, SECTION_VA, 0x200, SECTION_RAW)
+    struct.pack_into("<I", buf, table + 36, section_flags)
+    if text:
+        buf[SECTION_RAW + 0x140:SECTION_RAW + 0x140 + len(text)] = text
 
     base = SECTION_RAW
     struct.pack_into("<II", buf, base + export_at, 0, export_stamp)
@@ -88,7 +94,7 @@ def make_pe(stamp=0x11111111, checksum=0x22222222, guid=b"G" * 16, age=7,
     buf[base + cv_at + 24:base + cv_at + 28] = b"x.pd"
     buf[base + repro_at:base + repro_at + len(repro)] = repro
     buf[base + code_at:base + code_at + len(code)] = code
-    offsets = {"code": base + code_at, "cv_path": base + cv_at + 24}
+    offsets = {"code": base + code_at, "cv_path": base + cv_at + 24, "text": base + 0x140}
     return bytes(buf), offsets
 
 
@@ -170,9 +176,14 @@ class NormalizePe(unittest.TestCase):
         cleaned, _ = normalize(data)
         start = offsets["code"]
         self.assertEqual(cleaned[start:start + 16], data[start:start + 16])
-        path = offsets["cv_path"]
-        self.assertEqual(cleaned[path:path + 4], b"x.pd")
         self.assertEqual(cleaned[:2], b"MZ")
+
+    def test_pdb_path_is_noise(self):
+        # Two builds in two directories differ in the CodeView PDB path.
+        data, offsets = make_pe()
+        path = offsets["cv_path"]
+        self.assertEqual(data[path:path + 4], b"x.pd")
+        self.assertEqual(normalize(data)[0][path:path + 4], b"\x00" * 4)
 
     def test_truncated_pe_is_returned_unchanged(self):
         data, _ = make_pe()
@@ -1009,6 +1020,97 @@ class MergeKeys(unittest.TestCase):
                                         {"ghidriff": "removed"}, None)],
         })
         self.assertEqual(len(merged), 2)
+
+
+# --- ignore_strings (stage 5) ---------------------------------------------------
+
+STAMP_RULE = [r"built \d{4}-\d\d-\d\d \d\d:\d\d"]
+
+
+class IgnoreStrings(unittest.TestCase):
+    def test_a_declared_stamp_in_data_becomes_noise(self):
+        first, _ = make_pe(text=b"built 2026-10-31 22:15\x00")
+        second, _ = make_pe(text=b"built 2026-11-01 07:40\x00")
+        self.assertNotEqual(normalize(first)[0], normalize(second)[0])
+        self.assertEqual(normalize(first, STAMP_RULE)[0], normalize(second, STAMP_RULE)[0])
+
+    def test_only_the_match_is_zeroed(self):
+        data, offsets = make_pe(text=b"jq 1.7 built 2026-10-31 22:15 ok\x00")
+        cleaned, _ = normalize(data, STAMP_RULE)
+        at = offsets["text"]
+        self.assertEqual(cleaned[at:at + 7], b"jq 1.7 ")
+        self.assertEqual(cleaned[at + 7:at + 29], b"\x00" * 22)
+        self.assertEqual(cleaned[at + 29:at + 32], b" ok")
+
+    def test_strings_in_code_sections_are_never_touched(self):
+        # A matching run inside an executable section is instruction bytes that
+        # happen to be printable: zeroing it could hide a real code change.
+        first, _ = make_pe(text=b"built 2026-10-31 22:15\x00", section_flags=0x60000020)
+        second, _ = make_pe(text=b"built 2026-11-01 07:40\x00", section_flags=0x60000020)
+        self.assertNotEqual(normalize(first, STAMP_RULE)[0], normalize(second, STAMP_RULE)[0])
+
+    def test_elf_code_sections_are_protected_too(self):
+        # make_elf's .text section is PROGBITS without SHF_EXECINSTR (data); mark
+        # it executable and the same string must survive.
+        data, offsets = make_elf(code=b"built 2026-10-31 22:15\x00")
+        self.assertEqual(normalize(data, STAMP_RULE)[0][offsets["code"]:offsets["code"] + 5],
+                         b"\x00" * 5)
+        buf = bytearray(data)
+        shoff = struct.unpack_from("<Q", buf, 0x28)[0]
+        struct.pack_into("<Q", buf, shoff + 3 * 64 + 8, 0x6)        # SHF_ALLOC | SHF_EXECINSTR
+        kept = normalize(bytes(buf), STAMP_RULE)[0]
+        self.assertEqual(kept[offsets["code"]:offsets["code"] + 5], b"built")
+
+    def test_unknown_formats_get_the_declared_patterns(self):
+        data = b"\x00\x01firmware built 2026-10-31 22:15\x00\x02" * 3
+        cleaned, fmt = normalize(data, STAMP_RULE)
+        self.assertIsNone(fmt)
+        self.assertNotIn(b"2026", cleaned)
+
+    def test_summary_regions_ignore_declared_strings(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        a = os.path.join(work, "a.exe")
+        b = os.path.join(work, "b.exe")
+        with open(a, "wb") as handle:
+            handle.write(make_pe(text=b"built 2026-10-31 22:15\x00")[0])
+        with open(b, "wb") as handle:
+            handle.write(make_pe(text=b"built 2026-11-01 07:40\x00", code=b"\xcc" * 16)[0])
+        regions = summarize(a, b, STAMP_RULE).regions
+        self.assertEqual(len(regions), 1)
+        self.assertLess(regions[0][1], SECTION_RAW + 0x140)            # the code byte only
+
+
+class IgnoreStringsInRules(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.src = os.path.join(self.work, "src")
+        os.makedirs(self.src)
+        with open(os.path.join(self.src, "app.exe"), "wb") as handle:
+            handle.write(make_pe(text=b"built 2026-10-31 22:15\x00")[0])
+
+    def _copy(self, rule):
+        dst = os.path.join(self.work, "dst%d" % len(os.listdir(self.work)))
+        prepare_copy(self.src, dst, [rule])
+        with open(os.path.join(dst, "app.exe"), "rb") as handle:
+            return handle.read()
+
+    def test_applies_with_the_binary_step(self):
+        out = self._copy({"match": ["*.exe"], "normalize": [BINARY_STEP],
+                          "ignore_strings": STAMP_RULE})
+        self.assertNotIn(b"2026-10-31", out)
+
+    def test_ignored_without_the_binary_step(self):
+        out = self._copy({"match": ["*.exe"], "ignore_strings": STAMP_RULE})
+        self.assertIn(b"2026-10-31", out)
+
+    def test_binary_ignore_strings_lookup(self):
+        rules = [{"match": ["*.exe"], "normalize": [BINARY_STEP], "ignore_strings": STAMP_RULE},
+                 {"match": ["*.dll"], "ignore_strings": STAMP_RULE}]
+        self.assertEqual(binary_ignore_strings(rules, "bin/app.exe"), STAMP_RULE)
+        self.assertEqual(binary_ignore_strings(rules, "lib.dll"), [])
+        self.assertEqual(binary_ignore_strings(rules, "x.txt"), [])
 
 
 if __name__ == "__main__":

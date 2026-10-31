@@ -25,6 +25,7 @@ from .compare import binary_pairs, compare
 from .llm import Analysis, analyze_changes, http_chat
 from .output import build_html, build_json, build_report
 from .settings import load as load_settings
+from .rules import binary_ignore_strings
 from .symbols import cross_reference
 from . import binengines, gitrepo
 
@@ -126,7 +127,9 @@ def _run(args, config, settings, dir_a, dir_b, commits):
     comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
     xref = cross_reference(comparison.sections, dir_b)
     pairs = binary_pairs(comparison, dir_a, dir_b)
-    binary = {rel: summarize_binary(old, new) for rel, (old, new) in pairs.items()}
+    rules = config.get("rules") or []
+    binary = {rel: summarize_binary(old, new, binary_ignore_strings(rules, rel))
+              for rel, (old, new) in pairs.items()}
     functions = _binary_functions(args.engines, settings, pairs)
 
     # Decompiled diffs reach the model through the ordinary per-file pass: the

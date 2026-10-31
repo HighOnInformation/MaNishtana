@@ -307,6 +307,7 @@ values, so an existing config keeps working untouched.
 | `skip` | bool | Deleted from both copies — never compared |
 | `normalize` | list | Commands run in order, stdin to stdout |
 | `ignore_lines` | list | Every matching line becomes a fixed token on both sides |
+| `ignore_strings` | list | Binaries only, with `binary-stamps`: every match inside a printable string, outside code, is zeroed on both sides |
 
 **First matching rule wins**, and there is no negation — order specific before
 general. A file matched by no rule is compared raw. Matching is case-insensitive on
@@ -332,12 +333,29 @@ diff as **noise only** — the same definition as for source files:
 
 | Format | Fields zeroed |
 |---|---|
-| PE (`.exe`, `.dll`) | COFF link time, optional-header checksum, export and debug directory time stamps, CodeView PDB GUID and age, the reproducible-build hash |
+| PE (`.exe`, `.dll`) | COFF link time, optional-header checksum, export and debug directory time stamps, CodeView PDB GUID, age and path, the reproducible-build hash |
 | ELF (`.so`, `.o`, executables) | GNU build-id, `.gnu_debuglink` CRC |
 
 Any other format is compared as it is. The step runs in-process and needs nothing on
 `PATH`; listed for a text file, it does nothing. The default config still *skips*
 `*.o *.a *.so *.exe` — replace that skip rule with the one above to compare them.
+
+Build-specific **text** inside a binary (a version stamp from `git describe`, a
+`__DATE__`/`__TIME__` string, a build path) is not a field any format defines, so
+you declare it, the way `ignore_lines` works for source:
+
+```json
+{ "match": ["*.exe", "*.dll"], "normalize": ["binary-stamps"],
+  "ignore_strings": ["\\d\\.\\d+-(dirty|g[0-9a-f]{7})", "[A-Z][a-z]{2} [ \\d]\\d \\d{4} \\d\\d:\\d\\d:\\d\\d"] }
+```
+
+Each match inside a printable run of 4+ characters is zeroed on both sides of the
+normalized copy. **In PE and ELF files, executable sections are never touched**:
+there a printable run is instruction bytes, and zeroing it could hide a code
+change. Even a pattern that matches everything leaves code byte-identical. In a
+format MaNishtana cannot parse, the patterns apply to the whole file, because you
+declared them for those files. Keep patterns specific: anything they match in data
+stops counting as a change.
 
 A binary that still differs is described instead of being passed over: format,
 size before and after, SHA-256 of both, the differing byte regions (found on the
