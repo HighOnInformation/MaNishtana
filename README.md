@@ -354,22 +354,38 @@ optional; whichever are installed run, the rest are skipped with one warning.
 | Engine | Needs | Gives |
 |---|---|---|
 | `diaphora` | IDA (`idat64`/`idat`) and [Diaphora](https://github.com/joxeankoret/diaphora)'s `diaphora.py`; Hex-Rays for pseudo-code | function matches with a similarity ratio, and a decompiled diff per changed function |
+| `bindiff` | [BinDiff](https://github.com/google/bindiff) 8 (`bindiff`), and BinExport for IDA **or** for Ghidra (the BinDiff installer ships both) | function matches with similarity, from graph structure; no pseudo-code |
+
+When several engines run, their findings are merged per function. Each engine's
+verdict is kept, an engine that matched a function as identical counts as
+`unchanged`, and the report marks a function the engines **disagree** on — that is
+where a human should look first. The similarity shown is the lowest any engine gave.
 
 ```json
 "binary": {
-  "engines": ["diaphora"],
+  "engines": ["diaphora", "bindiff"],
   "ida": "C:/Program Files/IDA Professional 9.1",
   "diaphora": "C:/tools/diaphora",
   "python": "",
+  "bindiff": "C:/Program Files/BinDiff",
+  "ghidra": "C:/tools/ghidra_12.2_PUBLIC",
+  "java": "C:/tools/jdk-25",
   "timeout_sec": 1800,
   "max_functions": 200,
   "max_decompiled": 30
 }
 ```
 
-`ida` and `diaphora` may be a directory or the file itself. Left empty, they are
-looked for in `IDADIR` / `DIAPHORA_DIR`, then on `PATH`, then (on Windows) under
-`C:\Program Files\IDA*`. `python` runs Diaphora's diff step, which happens outside
+`ida`, `diaphora` and `bindiff` may be a directory or the file itself. Left
+empty, they are looked for in `IDADIR` / `DIAPHORA_DIR` / `BINDIFF_DIR`, then on
+`PATH`, then in the usual install directory (`C:\Program Files\IDA*`,
+`C:\Program Files\BinDiff`, `/opt/bindiff`). `ghidra` is the install directory
+(or `GHIDRA_INSTALL_DIR`). The BinExport plugin is looked for in IDA's `plugins`
+and the user plugin directory; the Ghidra extension in Ghidra's `Ghidra/Extensions`
+and the user's extension directory. BinDiff prefers IDA's exporter when both are
+present: the Ghidra one is documented as experimental. `java` is a JDK for Ghidra
+only, passed as `JAVA_HOME` to Ghidra runs — **Ghidra 12 needs Java 25 or newer**,
+often newer than the machine's default. `python` runs Diaphora's diff step, which happens outside
 IDA; empty means the interpreter running MaNishtana. `timeout_sec` applies to each
 IDA run. `max_functions` caps the table in the report (JSON always has them all);
 `max_decompiled` caps how many of the most changed functions' pseudo-code go to the
@@ -518,6 +534,13 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
   lines are Diaphora's own (from its test harness) and its result reading was
   checked against Diaphora's real diff step, but the IDA export itself must be
   verified on a machine that has IDA: `--check-binary-tools`, then one run.
+- **BinDiff on Ghidra 12 needs a patched BinExport extension.** The one BinDiff 8
+  ships was built for Ghidra 10.3. It needs its version changed to load, and a
+  one-line fix to stop crashing on real binaries. Both steps are in
+  [`docs/worklog/binexport-ghidra12/`](docs/worklog/binexport-ghidra12/README.md).
+  Ghidra exits 0 even when the export script fails, so MaNishtana judges success
+  by whether the export file exists. Each side takes about a minute for a 1 MB
+  binary, so set `timeout_sec` generously for large ones.
 - **Function names are what the disassembler recovers.** On a stripped binary they
   are `sub_401000`-style addresses, and a function that moved is matched by
   structure, not by name.

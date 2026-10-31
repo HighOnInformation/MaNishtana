@@ -14,6 +14,10 @@ Each engine is an adapter that turns one tool's native output into FunctionChang
 
     diaphora   IDA (idat) exports each side with diaphora.py, then diaphora.py diffs
                the two exports; results and pseudo-code are read from SQLite.
+    bindiff    BinExport writes each side (IDA plugin, else the Ghidra extension),
+               bindiff matches them; matches are read from the .BinDiff SQLite and
+               the function lists from the .BinExport protobufs, because BinDiff
+               records matched functions only and added/removed are the rest.
 
 `status` is "modified", "added" or "removed". `views` is {engine: status} for every
 engine that ran, with "unchanged" for an engine that matched the function and found
@@ -36,11 +40,12 @@ import glob
 import os
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 
-ENGINES = ("diaphora",)
+ENGINES = ("diaphora", "bindiff")
 
 FunctionChange = collections.namedtuple(
     "FunctionChange", "name_a name_b status similarity views pseudo_diff"
@@ -50,10 +55,12 @@ FunctionChange = collections.namedtuple(
 # non-empty `engines` means "no function changed", never "nothing could run".
 FunctionDiff = collections.namedtuple("FunctionDiff", "engines changes notes")
 
-# Tools each engine needs. Hex-Rays is optional for Diaphora: without it the
-# function matching still works, there is just no pseudo-code to diff.
+# Tools each engine needs, as alternatives: the engine can run when every tool of
+# any one alternative was found. Hex-Rays is optional for Diaphora: without it the
+# matching still works, there is just no pseudo-code to diff.
 _NEEDS = {
-    "diaphora": ("idat", "diaphora"),
+    "diaphora": [("idat", "diaphora")],
+    "bindiff": [("bindiff", "idat", "binexport_ida"), ("bindiff", "ghidra", "binexport_ghidra")],
 }
 
 _TOOL_LABELS = (
@@ -61,7 +68,38 @@ _TOOL_LABELS = (
     ("hexrays", "Hex-Rays decompiler plugin"),
     ("diaphora", "Diaphora (diaphora.py)"),
     ("python", "Python for Diaphora's diff step"),
+    ("bindiff", "BinDiff (bindiff)"),
+    ("binexport_ida", "BinExport plugin for IDA"),
+    ("ghidra", "Ghidra (analyzeHeadless)"),
+    ("binexport_ghidra", "BinExport extension for Ghidra"),
+    ("java", "JDK for Ghidra (binary.java)"),
 )
+
+# BinExport2 protobuf field numbers (binexport2.proto): BinExport2.call_graph = 8,
+# CallGraph.vertex = 1, Vertex.address = 1, .type = 2, .mangled_name = 3,
+# .demangled_name = 4. Type NORMAL = 0; library, imported and thunk functions are
+# not the binary's own code and are left out of added/removed.
+_BX_CALL_GRAPH, _BX_VERTEX = 8, 1
+_BX_NORMAL = 0
+
+# Headless Ghidra cannot call an exporter on its own; this post-script does.
+_GHIDRA_BINEXPORT_SCRIPT = """\
+// Written by MaNishtana: export currentProgram with BinExport to the first argument.
+import java.io.File;
+import com.google.security.binexport.BinExportExporter;
+import ghidra.app.script.GhidraScript;
+
+public class ManishtanaBinExport extends GhidraScript {
+  @Override
+  public void run() throws Exception {
+    File out = new File(getScriptArgs()[0]);
+    BinExportExporter exporter = new BinExportExporter();
+    if (!exporter.export(out, currentProgram, currentProgram.getMemory(), monitor)) {
+      throw new RuntimeException("BinExport failed for " + currentProgram.getName());
+    }
+  }
+}
+"""
 
 _STATUS_ORDER = {"removed": 0, "added": 1, "modified": 2}
 
@@ -74,11 +112,18 @@ def discover(binary):
     tools["diaphora"] = _find_file(binary.get("diaphora"), os.environ.get("DIAPHORA_DIR"),
                                    "diaphora.py")
     tools["python"] = binary.get("python") or sys.executable
+    tools["bindiff"] = _find_bindiff(binary.get("bindiff"), os.environ.get("BINDIFF_DIR"))
+    tools["binexport_ida"] = _find_binexport_ida(tools["idat"])
+    tools["ghidra"] = _find_ghidra(binary.get("ghidra"), os.environ.get("GHIDRA_INSTALL_DIR"))
+    tools["binexport_ghidra"] = _find_binexport_ghidra(tools["ghidra"])
+    # A JDK for Ghidra only. Ghidra 12 needs Java 25+, often newer than the box's
+    # default; this goes to JAVA_HOME for Ghidra runs and changes nothing else.
+    tools["java"] = binary.get("java") or None
     return tools
 
 
 def runnable(tools):
-    return [name for name in ENGINES if all(tools.get(tool) for tool in _NEEDS[name])]
+    return [name for name in ENGINES if not _missing(name, tools)]
 
 
 def describe_tools(tools):
@@ -92,7 +137,7 @@ def describe_tools(tools):
     lines.append("")
     engines = runnable(tools)
     for name in ENGINES:
-        missing = [tool for tool in _NEEDS[name] if not tools.get(tool)]
+        missing = _missing(name, tools)
         state = "ready" if not missing else "missing: %s" % ", ".join(missing)
         lines.append("  engine %-10s %s" % (name, state))
     lines.append("")
@@ -148,6 +193,16 @@ def decompiled_diff(changes, limit):
 # --- internals: discovery ----------------------------------------------------
 
 
+def _missing(engine, tools):
+    """The tools still missing for the nearest alternative; empty means ready."""
+    best = None
+    for alternative in _NEEDS[engine]:
+        missing = [tool for tool in alternative if not tools.get(tool)]
+        if best is None or len(missing) < len(best):
+            best = missing
+    return best
+
+
 def _find_ida(given, env_dir):
     """idat64 before idat: before IDA 9, plain idat is the 32-bit build."""
     names = ["idat64", "idat"]
@@ -198,6 +253,76 @@ def _find_hexrays(idat):
     return None
 
 
+def _find_bindiff(given, env_dir):
+    places = [given, env_dir]
+    if os.name == "nt":
+        places.append(r"C:\Program Files\BinDiff")
+    else:
+        places.append("/opt/bindiff")
+    for place in places:
+        if not place:
+            continue
+        if os.path.isfile(place):
+            return os.path.abspath(place)
+        for sub in ("", "bin"):
+            found = _in_dir(os.path.join(place, sub), ["bindiff"])
+            if found:
+                return found
+    return shutil.which("bindiff")
+
+
+def _find_binexport_ida(idat):
+    """binexport12_ida64.dll / .so in IDA's plugins, or the user plugin directory."""
+    places = []
+    if idat:
+        places.append(os.path.join(os.path.dirname(idat), "plugins"))
+    if os.environ.get("IDAUSR"):
+        places.extend(os.path.join(p, "plugins") for p in os.environ["IDAUSR"].split(os.pathsep))
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        places.append(os.path.join(os.environ["APPDATA"], "Hex-Rays", "IDA Pro", "plugins"))
+    places.append(os.path.join(os.path.expanduser("~"), ".idapro", "plugins"))
+    for place in places:
+        try:
+            names = sorted(os.listdir(place))
+        except OSError:
+            continue
+        for name in names:
+            low = name.lower()
+            if low.startswith("binexport") and "_ida" in low:
+                return os.path.join(place, name)
+    return None
+
+
+def _find_ghidra(given, env_dir):
+    """A Ghidra install directory, recognised by support/analyzeHeadless."""
+    for place in (given, env_dir):
+        if place and _headless(place):
+            return os.path.abspath(place)
+    return None
+
+
+def _headless(ghidra):
+    script = "analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless"
+    path = os.path.join(ghidra, "support", script)
+    return path if os.path.isfile(path) else None
+
+
+def _find_binexport_ghidra(ghidra):
+    """The BinExport extension, in Ghidra's own Extensions or the user's."""
+    if not ghidra:
+        return None
+    places = [os.path.join(ghidra, "Ghidra", "Extensions", "BinExport")]
+    home = os.path.expanduser("~")
+    for pattern in (os.path.join(os.environ.get("APPDATA", home), "ghidra", "*", "Extensions"),
+                    os.path.join(home, ".config", "ghidra", "*", "Extensions"),
+                    os.path.join(home, ".ghidra", ".ghidra_*", "Extensions")):
+        places.extend(os.path.join(found, "BinExport") for found in glob.glob(pattern))
+    for place in places:
+        if glob.glob(os.path.join(place, "lib", "BinExport*.jar")):
+            return place
+    return None
+
+
 def _find_file(given, env_dir, filename):
     for place in (given, env_dir):
         if not place:
@@ -214,15 +339,28 @@ def _find_file(given, env_dir, filename):
 
 
 def _run(argv, cwd, env, timeout):
-    """The production seam: run a process, never raise, capture everything."""
+    """The production seam: run a process, never raise, capture everything.
+
+    stdin is empty on purpose. Ghidra's launcher asks for a JDK path when it cannot
+    find one, then waits on "Press any key"; with an inherited console that is a
+    hang until the timeout, with an empty stdin it fails at once with its message.
+    """
     try:
-        proc = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, timeout=timeout)
+        proc = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, "timed out after %ds" % timeout
     except OSError as exc:
         return None, str(exc)
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+
+def _env_for(tools, ghidra=False):
+    env = dict(os.environ)
+    if ghidra and tools.get("java"):
+        env["JAVA_HOME"] = tools["java"]
+    return env
 
 
 def _stage(path, directory):
@@ -343,6 +481,150 @@ def _unified(name_a, name_b, text_a, text_b):
     return diff or None
 
 
+# --- internals: BinDiff ------------------------------------------------------
+
+
+def _bindiff(old, new, tools, run, work, timeout):
+    """Export both sides with BinExport, match them with bindiff, read the result.
+
+    IDA's plugin is preferred when both are present: BinExport for Ghidra is
+    documented as experimental. IDA command line from BinExport's README:
+    `idat -A -OBinExportModule:<out> -OBinExportAutoAction:BinExportBinary <file>`.
+    """
+    use_ida = bool(tools.get("idat") and tools.get("binexport_ida"))
+    exports = {}
+    for side, path in (("old", old), ("new", new)):
+        copy = _stage(path, os.path.join(work, side))
+        export = os.path.join(work, side + ".BinExport")
+        if use_ida:
+            argv = [tools["idat"], "-A", "-OBinExportModule:" + export,
+                    "-OBinExportAutoAction:BinExportBinary", copy]
+            via = "IDA"
+        else:
+            script_dir = os.path.join(work, "ghidra_scripts")
+            if not os.path.isdir(script_dir):
+                os.makedirs(script_dir)
+                with open(os.path.join(script_dir, "ManishtanaBinExport.java"), "w") as handle:
+                    handle.write(_GHIDRA_BINEXPORT_SCRIPT)
+            project = os.path.join(work, side + "_project")
+            os.makedirs(project)
+            argv = [_headless(tools["ghidra"]), project, "p", "-import", copy,
+                    "-scriptPath", script_dir, "-postScript", "ManishtanaBinExport.java",
+                    export, "-deleteProject"]
+            via = "Ghidra"
+        code, output = run(argv, os.path.dirname(copy), _env_for(tools, ghidra=not use_ida),
+                           timeout)
+        if code != 0 or not os.path.isfile(export):
+            return None, "bindiff: BinExport via %s failed for the %s side (%s) %s" % (
+                via, side, "exit %s" % code if code is not None else output, _tail(output))
+        exports[side] = export
+
+    out_dir = os.path.join(work, "out")
+    os.makedirs(out_dir)
+    code, output = run([tools["bindiff"], "--primary=" + exports["old"],
+                        "--secondary=" + exports["new"], "--output_dir=" + out_dir,
+                        "--output_format=bin"], work, dict(os.environ), timeout)
+    results = glob.glob(os.path.join(out_dir, "*.BinDiff"))
+    if code != 0 or not results:
+        return None, "bindiff: matching failed (%s) %s" % (
+            "exit %s" % code if code is not None else output, _tail(output))
+    return _read_bindiff(results[0], exports["old"], exports["new"]), None
+
+
+def _read_bindiff(result, export_old, export_new):
+    """Matched pairs from the .BinDiff database; the unmatched rest from the exports."""
+    con = sqlite3.connect(result)
+    try:
+        rows = con.execute(
+            "select address1, name1, address2, name2, similarity from function").fetchall()
+    finally:
+        con.close()
+    funcs_old = _binexport_functions(export_old)
+    funcs_new = _binexport_functions(export_new)
+    changes = []
+    for address1, name1, address2, name2, similarity in rows:
+        similarity = float(similarity)
+        if similarity >= 1.0:
+            continue
+        changes.append(FunctionChange(funcs_old.get(address1, name1), funcs_new.get(address2, name2),
+                                      "modified", similarity, {"bindiff": "modified"}, None))
+    matched_old = set(row[0] for row in rows)
+    matched_new = set(row[2] for row in rows)
+    for address, name in sorted(funcs_old.items()):
+        if address not in matched_old:
+            changes.append(FunctionChange(name, None, "removed", None, {"bindiff": "removed"}, None))
+    for address, name in sorted(funcs_new.items()):
+        if address not in matched_new:
+            changes.append(FunctionChange(None, name, "added", None, {"bindiff": "added"}, None))
+    return changes
+
+
+def _binexport_functions(path):
+    """{address: name} for the binary's own functions in a .BinExport protobuf.
+
+    A minimal protobuf reader is enough: only the call graph's vertices are needed,
+    and the standard library has no protobuf module. Unnamed functions get IDA's
+    sub_ADDRESS convention so both engines name them the same way.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    functions = {}
+    for field, value in _proto_fields(data):
+        if field != _BX_CALL_GRAPH:
+            continue
+        for sub, vertex in _proto_fields(value):
+            if sub != _BX_VERTEX:
+                continue
+            fields = dict(_proto_fields(vertex))
+            if fields.get(2, _BX_NORMAL) != _BX_NORMAL or 1 not in fields:
+                continue
+            address = fields[1]
+            name = fields.get(4) or fields.get(3)
+            name = name.decode("utf-8", "replace") if name else "sub_%X" % address
+            functions[address] = name
+    return functions
+
+
+def _proto_fields(data):
+    """Yield (field number, value) from one protobuf message, top level only.
+
+    Varints come back as int, length-delimited fields as bytes; fixed 32/64-bit
+    fields as int. Groups (wire types 3 and 4) are obsolete and not expected.
+    """
+    at, end = 0, len(data)
+    while at < end:
+        key, at = _varint(data, at)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            value, at = _varint(data, at)
+        elif wire == 2:
+            length, at = _varint(data, at)
+            value = data[at:at + length]
+            at += length
+        elif wire == 1:
+            value = struct.unpack_from("<Q", data, at)[0]
+            at += 8
+        elif wire == 5:
+            value = struct.unpack_from("<I", data, at)[0]
+            at += 4
+        else:
+            raise ValueError("unsupported protobuf wire type %d" % wire)
+        yield field, value
+
+
+def _varint(data, at):
+    result, shift = 0, 0
+    while True:
+        if at >= len(data):
+            raise ValueError("truncated protobuf varint")
+        byte = data[at]
+        at += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, at
+        shift += 7
+
+
 # --- internals: merging ------------------------------------------------------
 
 
@@ -386,4 +668,5 @@ def _merge(found):
 
 _ADAPTERS = {
     "diaphora": _diaphora,
+    "bindiff": _bindiff,
 }

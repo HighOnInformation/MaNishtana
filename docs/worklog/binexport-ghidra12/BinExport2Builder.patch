@@ -1,0 +1,18 @@
+diff --git a/src/main/java/com/google/security/binexport/BinExport2Builder.java b/src/main/java/com/google/security/binexport/BinExport2Builder.java
+index 7ad3819..6399cf4 100644
+--- a/src/main/java/com/google/security/binexport/BinExport2Builder.java
++++ b/src/main/java/com/google/security/binexport/BinExport2Builder.java
+@@ -289,8 +289,12 @@ public class BinExport2Builder {
+         }
+         flowGraph.addBasicBlockIndex(id);
+ 
++        // Patched for MaNishtana: getInstructionBefore() is null for a
++        // one-instruction block with nothing before it; the block's last
++        // instruction is the one containing its max address.
++        Instruction bbLastInstr = listing.getInstructionContaining(bb.getMaxAddress());
+         long bbLastInstrAddress =
+-            getMappedAddress(listing.getInstructionBefore(bb.getMaxAddress()));
++            bbLastInstr != null ? getMappedAddress(bbLastInstr) : bbAddress;
+         var edges = new ArrayList<BinExport2.FlowGraph.Edge>();
+         var lastFlow = RefType.INVALID;
+         for (var bbDestIter = bb.getDestinations(monitor); bbDestIter.hasNext(); ) {

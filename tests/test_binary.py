@@ -21,6 +21,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.binengines import (
+    _binexport_functions,
+    _merge,
     FunctionChange,
     FunctionDiff,
     decompiled_diff,
@@ -649,6 +651,227 @@ class EngineFlags(unittest.TestCase):
         code, out, _err = self._main(["--check-binary-tools", "-c", self.config])
         self.assertEqual(code, 0)
         self.assertIn("engine diaphora", out)
+
+
+# --- BinDiff ------------------------------------------------------------------
+
+
+def pb_varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def pb_field(number, value):
+    """Encode one protobuf field: int as varint, bytes/str as length-delimited."""
+    if isinstance(value, int):
+        return pb_varint(number << 3) + pb_varint(value)
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    return pb_varint(number << 3 | 2) + pb_varint(len(value)) + value
+
+
+def binexport(functions):
+    """A BinExport2 message holding only a call graph: [(address, name, type)]."""
+    vertices = b""
+    for address, name, kind in functions:
+        vertex = pb_field(1, address)
+        if kind:
+            vertex += pb_field(2, kind)
+        if name:
+            vertex += pb_field(3, name)
+        vertices += pb_field(1, vertex)
+    return pb_field(1, b"meta") + pb_field(8, vertices)
+
+
+OLD_FUNCS = [(0x1000, "parse", 0), (0x1100, "legacy", 0), (0x1200, "same", 0),
+             (0x9000, "memcpy", 1), (0x1300, None, 0)]
+NEW_FUNCS = [(0x1000, "parse", 0), (0x1180, "fresh", 0), (0x1200, "same", 0),
+             (0x9000, "memcpy", 1), (0x1300, None, 0)]
+
+
+class FakeBinDiff:
+    """Stands in for the run seam: BinExport (IDA or Ghidra) then bindiff."""
+
+    def __init__(self, fail_matching=False):
+        self.calls = []
+        self.fail_matching = fail_matching
+
+    def __call__(self, argv, cwd, env, timeout):
+        self.calls.append((list(argv), env))
+        if os.path.basename(argv[0]).startswith("bindiff"):
+            if self.fail_matching:
+                return 1, "bindiff: bad file\n"
+            out_dir = [a for a in argv if a.startswith("--output_dir=")][0].split("=", 1)[1]
+            write_db(os.path.join(out_dir, "old_vs_new.BinDiff"), [
+                ("create table function (id integer primary key, address1 bigint, name1 text, "
+                 "address2 bigint, name2 text, similarity double precision, confidence double "
+                 "precision, flags integer, algorithm smallint, evaluate boolean, "
+                 "commentsported boolean, basicblocks integer, edges integer, "
+                 "instructions integer)", None),
+                ("insert into function (address1, name1, address2, name2, similarity, confidence)"
+                 " values (?,?,?,?,?,?)", [
+                     (0x1000, "parse", 0x1000, "parse", 0.62, 0.9),
+                     (0x1200, "same", 0x1200, "same", 1.0, 1.0),
+                     (0x9000, "memcpy", 0x9000, "memcpy", 1.0, 1.0),
+                     (0x1300, "sub_1300", 0x1300, "sub_1300", 1.0, 1.0),
+                 ]),
+            ])
+            return 0, "done\n"
+        if any(a.startswith("-OBinExportModule:") for a in argv):
+            export = [a for a in argv if a.startswith("-OBinExportModule:")][0].split(":", 1)[1]
+        else:
+            export = argv[argv.index("ManishtanaBinExport.java") + 1]
+        side = os.path.basename(os.path.dirname(argv[-1] if "-OBinExportModule:" in " ".join(argv)
+                                                else argv[argv.index("-import") + 1]))
+        with open(export, "wb") as handle:
+            handle.write(binexport(OLD_FUNCS if side == "old" else NEW_FUNCS))
+        return 0, "exported\n"
+
+
+class BinDiffSetup(EngineSetup):
+    def setUp(self):
+        super(BinDiffSetup, self).setUp()
+        self.ghidra = os.path.join(self.work, "ghidra_12.2_PUBLIC")
+        os.makedirs(os.path.join(self.ghidra, "support"))
+        headless = "analyzeHeadless.bat" if os.name == "nt" else "analyzeHeadless"
+        open(os.path.join(self.ghidra, "support", headless), "wb").close()
+        lib = os.path.join(self.ghidra, "Ghidra", "Extensions", "BinExport", "lib")
+        os.makedirs(lib)
+        open(os.path.join(lib, "BinExport.jar"), "wb").close()
+        self.bindiff_dir = os.path.join(self.work, "BinDiff")
+        os.makedirs(os.path.join(self.bindiff_dir, "bin"))
+        open(os.path.join(self.bindiff_dir, "bin", "bindiff.exe"), "wb").close()
+        open(os.path.join(self.ida_dir, "plugins", "binexport12_ida64.dll"), "wb").close()
+        self.binary = load_settings({"binary": {
+            "ida": self.ida_dir, "diaphora": os.path.dirname(self.diaphora), "python": "py3",
+            "bindiff": self.bindiff_dir, "ghidra": self.ghidra, "java": "/jdk25"}}, ".").binary
+        self.tools = discover(self.binary)
+        self.ghidra_only = dict(self.tools, idat=None, binexport_ida=None)
+
+
+class BinDiffDiscovery(BinDiffSetup):
+    def test_tools_are_found(self):
+        self.assertTrue(self.tools["bindiff"].endswith("bindiff.exe"))
+        self.assertTrue(self.tools["binexport_ida"].endswith("binexport12_ida64.dll"))
+        self.assertEqual(self.tools["ghidra"], os.path.abspath(self.ghidra))
+        self.assertTrue(self.tools["binexport_ghidra"].endswith("BinExport"))
+        self.assertEqual(runnable(self.tools), ["diaphora", "bindiff"])
+
+    def test_either_exporter_is_enough(self):
+        self.assertIn("bindiff", runnable(self.ghidra_only))
+        no_ghidra = dict(self.tools, ghidra=None, binexport_ghidra=None)
+        self.assertIn("bindiff", runnable(no_ghidra))
+        neither = dict(self.ghidra_only, ghidra=None)
+        self.assertNotIn("bindiff", runnable(neither))
+        self.assertIn("engine bindiff    missing: ", describe_tools(neither))
+
+
+class BinDiffAdapter(BinDiffSetup):
+    def test_matched_unmatched_and_library_functions(self):
+        found = diff_functions(self.old, self.new, ["bindiff"], self.tools, self.binary,
+                               run=FakeBinDiff())
+        self.assertEqual(found.engines, ["bindiff"])
+        summary = sorted((c.status, c.name_a, c.name_b) for c in found.changes)
+        self.assertEqual(summary, [("added", None, "fresh"), ("modified", "parse", "parse"),
+                                   ("removed", "legacy", None)])
+        modified = [c for c in found.changes if c.status == "modified"][0]
+        self.assertAlmostEqual(modified.similarity, 0.62)
+        self.assertIsNone(modified.pseudo_diff)
+
+    def test_ida_plugin_is_preferred(self):
+        fake = FakeBinDiff()
+        diff_functions(self.old, self.new, ["bindiff"], self.tools, self.binary, run=fake)
+        argv = fake.calls[0][0]
+        self.assertEqual(argv[0], self.tools["idat"])
+        self.assertIn("-OBinExportAutoAction:BinExportBinary", argv)
+        self.assertNotEqual(fake.calls[0][1].get("JAVA_HOME"), "/jdk25")   # IDA run: untouched
+
+    def test_ghidra_path_writes_the_post_script_and_sets_java(self):
+        fake = FakeBinDiff()
+        found = diff_functions(self.old, self.new, ["bindiff"], self.ghidra_only, self.binary,
+                               run=fake)
+        argv, env = fake.calls[0]
+        self.assertTrue(argv[0].endswith(("analyzeHeadless", "analyzeHeadless.bat")))
+        self.assertIn("-postScript", argv)
+        self.assertIn("-deleteProject", argv)
+        script_dir = argv[argv.index("-scriptPath") + 1]
+        self.assertTrue(script_dir.endswith("ghidra_scripts"))
+        self.assertEqual(env["JAVA_HOME"], "/jdk25")
+        self.assertEqual(len(found.changes), 3)
+        bindiff_argv = fake.calls[2][0]
+        self.assertTrue(bindiff_argv[1].startswith("--primary="))
+
+    def test_failed_matching_is_a_note(self):
+        found = diff_functions(self.old, self.new, ["bindiff"], self.tools, self.binary,
+                               run=FakeBinDiff(fail_matching=True))
+        self.assertEqual(found.engines, [])
+        self.assertIn("bindiff: matching failed", found.notes[0])
+
+
+class BinExportReader(unittest.TestCase):
+    def test_names_types_and_unnamed(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        path = os.path.join(work, "x.BinExport")
+        with open(path, "wb") as handle:
+            handle.write(binexport([(0x401000, "main", 0), (0x402000, "printf", 2),
+                                    (0x403000, None, 0), (0x404000, "thunk", 3)]))
+        self.assertEqual(_binexport_functions(path),
+                         {0x401000: "main", 0x403000: "sub_403000"})
+
+    def test_large_addresses_and_unknown_fields_are_skipped_cleanly(self):
+        data = pb_field(5, 123) + pb_field(8, pb_field(1, pb_field(1, 0xFFFFFFFF00001000)
+                                                       + pb_field(9, "extra")
+                                                       + pb_field(4, "demangled()")))
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        path = os.path.join(work, "y.BinExport")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        self.assertEqual(_binexport_functions(path), {0xFFFFFFFF00001000: "demangled()"})
+
+
+class TwoEngines(BinDiffSetup):
+    def _both(self):
+        diaphora_fake, bindiff_fake = FakeEngines(), FakeBinDiff()
+
+        def run(argv, cwd, env, timeout):
+            if "DIAPHORA_AUTO" in env or argv[0] == "py3":
+                return diaphora_fake(argv, cwd, env, timeout)
+            return bindiff_fake(argv, cwd, env, timeout)
+        return diff_functions(self.old, self.new, ["diaphora", "bindiff"], self.tools,
+                              self.binary, run=run)
+
+    def test_views_from_both_and_agreement(self):
+        found = self._both()
+        self.assertEqual(found.engines, ["diaphora", "bindiff"])
+        parse = [c for c in found.changes if c.name_a == "parse"][0]
+        self.assertEqual(parse.views, {"diaphora": "modified", "bindiff": "modified"})
+        self.assertAlmostEqual(parse.similarity, 0.62)   # the lower of 0.75 and 0.62
+        self.assertIn("+  if (!s)", parse.pseudo_diff)    # pseudo-code from Diaphora
+
+    def test_an_engine_that_did_not_list_a_function_saw_it_unchanged(self):
+        diaphora_only = FunctionChange("x", "x", "modified", 0.5, {"diaphora": "modified"}, None)
+        merged = _merge({"diaphora": [diaphora_only], "bindiff": []})
+        self.assertEqual(merged[0].views, {"diaphora": "modified", "bindiff": "unchanged"})
+
+    def test_disagreement_is_flagged_in_the_report(self):
+        found = FunctionDiff(["diaphora", "bindiff"], _merge({
+            "diaphora": [FunctionChange("x", "x", "modified", 0.5, {"diaphora": "modified"}, None)],
+            "bindiff": []}), [])
+        md = build_report("v1", "v2", binary_comparison({"a.exe": ("M", ["a.exe"])}), {}, None,
+                          binary={"a.exe": BinarySummary("pe", 1, 1, "a", "b", [], 0, [], [],
+                                                         0, 0)},
+                          functions={"a.exe": found})
+        self.assertIn("modified ⚠ engines disagree", md)
+        self.assertIn("bindiff: unchanged, diaphora: modified", md)
 
 
 if __name__ == "__main__":
