@@ -424,3 +424,81 @@ Diaphora at commit `35c7657`.
 6. Optional: start `python docs/worklog/checks/mock_llm.py 18765 requests.jsonl`,
    set `llm.base_url` to `http://127.0.0.1:18765/v1`, and read `requests.jsonl` to
    see exactly what the model would be sent before pointing at the real endpoint.
+
+### Stage 5 — `feature/binary-noise-plus` (from `feature/binary-ghidriff` @ `8cbe65d`)
+
+**Goal:** recognise more rebuild noise in binaries without ever hiding a code change.
+
+| Commit | What and why |
+|---|---|
+| `d4bda2d` | `ignore_strings` rule option, and the CodeView PDB path counts as noise. |
+| `0f6e10e` | **Fixes from an independent review:** code stays protected when a PE/ELF header does not parse; `^`/`$` work; bad patterns fail at startup. |
+| (this commit) | Worklog, and a test no longer writes `report.md` into the current directory. |
+
+**Intent of each change**
+
+1. **`binnoise.py`**
+   - `normalize(data, ignore_strings=None)` and `summarize(a, b, ignore_strings=None)`.
+   - `_ignore_strings` zeroes every regex match inside printable runs of 4 or more
+     characters, matching each run on its own so that anchors work.
+   - It never touches code. `_code_ranges` errs wide:
+     - PE: executable or code sections, widened to 0x200 alignment, plus the
+       headers.
+     - ELF: executable `PT_LOAD` segments plus `SHF_EXECINSTR` sections.
+     - If the ranges cannot be computed, nothing is touched.
+   - The format for that decision comes from the magic bytes (`MZ`, `\x7fELF`),
+     not from whether the stamp parser succeeded.
+   - `binary-stamps` now also zeroes the CodeView PDB path (the whole RSDS
+     payload after the signature).
+2. **`rules.py`**:
+   - `_rewrite_binary` passes the rule's `ignore_strings`, and also writes
+     unknown formats when the patterns changed them.
+   - New public `binary_ignore_strings(rules, rel)`, used by `cli` for the
+     summary's regions.
+3. **`cli.py`**:
+   - `_check_ignore_strings` validates the patterns at startup (non-string or
+     invalid regex means exit 2).
+   - The summary uses the rule's patterns.
+4. **Tests**:
+   - `make_pe` gains `text=` and `section_flags=`.
+   - The tests cover data vs code (PE and ELF), only the match zeroed, unknown
+     formats, summary regions, the rule plumbing and the startup errors.
+   - The four review attacks are regression tests: broken debug directory,
+     garbage `e_shoff`, `MZ` without a PE signature, anchors.
+5. **README**: the `ignore_strings` row, the paragraph with an example, and the PDB
+   path in the PE field list.
+
+**[Decided]** `ignore_strings` is an option of `binary-stamps`. On a rule without
+that step it does nothing, so binary rewriting has one entry point.
+
+**[Decided]** Formats that are neither PE nor ELF get the patterns over the whole
+file. The user declared them for those files. The README warns that archives and
+objects contain code.
+
+**[Decided]** No compiler-built rebuild corpus. Downloading a portable compiler
+(Zig) was blocked by the session's permission rules, so rebuilds are simulated by
+rewriting build-specific bytes in the real jq binaries.
+
+**How the work was checked**
+
+- Unit tests: 231 at `0f6e10e`.
+- **Real binaries:** jq 1.7 (PE) "rebuilt" with its version stamp `1.7-dirty`
+  rewritten to `1.7-clean`.
+  - With `"ignore_strings": ["1\\.7-[a-z]{5}"]`: **noise only**.
+  - Without it: **modified**.
+  - The stamp is at file offset 0x8B48F, in a data section. The pattern zeroed
+    exactly those 9 bytes on top of the 7 stamp bytes.
+- **Worst case:** a pattern matching everything (`[\s\S]+`) changed 48,768 data
+  bytes and **0 code bytes**, on both the jq PE and the jq ELF.
+- **Independent review:** a separate agent reviewed the commit cold, without my
+  reasoning, and reproduced each finding on doctored copies of jq.
+  - It found the real safety bug. A PE with an oversized debug directory, or an
+    ELF with a garbage `e_shoff`, still loads and runs, but the stamp parser
+    failed, the file was treated as "unknown", and a match-everything pattern
+    zeroed 51–58 KB of code.
+  - After `0f6e10e`, its own attack script reports 0 code bytes changed in every
+    case.
+  - It also found the `^` anchor problem.
+- Not done: a rename between two paths that match different rules uses the new
+  path's patterns for the summary's region list. This affects only the
+  description, never the classification.

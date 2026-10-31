@@ -1160,7 +1160,8 @@ class IgnoreStringsConfig(unittest.TestCase):
             json.dump({"rules": [rule]}, handle)
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = main([self.work, self.work, "-c", config, "--no-llm"])
+            code = main([self.work, self.work, "-c", config, "--no-llm",
+                         "-o", os.path.join(self.work, "report.md")])
         return code, err.getvalue()
 
     def test_an_invalid_pattern_is_a_startup_error(self):
