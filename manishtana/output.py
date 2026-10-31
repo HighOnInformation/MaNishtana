@@ -683,6 +683,8 @@ def _functions_json(found):
                 "similarity": change.similarity,
                 "views": dict(change.views),
                 "pseudo_diff": change.pseudo_diff,
+                "address_a": getattr(change, "address_a", None),
+                "address_b": getattr(change, "address_b", None),
             }
             for change in found.changes
         ],

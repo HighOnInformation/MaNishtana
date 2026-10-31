@@ -2,7 +2,8 @@
 
 Public interface:
     ENGINES                                     every engine name this version knows
-    FunctionChange   namedtuple(name_a, name_b, status, similarity, views, pseudo_diff)
+    FunctionChange   namedtuple(name_a, name_b, status, similarity, views, pseudo_diff,
+                                address_a=None, address_b=None)
     discover(binary_settings) -> tools          {tool: path or None}
     runnable(tools) -> [engine]                 engines whose tools were all found
     describe_tools(tools) -> str                the --check-binary-tools report
@@ -53,8 +54,13 @@ import tempfile
 
 ENGINES = ("diaphora", "bindiff", "ghidriff")
 
+# Addresses are the function's entry point in the old (a) and new (b) binary, as
+# the engine reports it. All three engines report the loaded virtual address, so
+# the same function has the same address whichever engine found it; that is what
+# lets findings merge even when the engines name a function differently.
 FunctionChange = collections.namedtuple(
-    "FunctionChange", "name_a name_b status similarity views pseudo_diff"
+    "FunctionChange", "name_a name_b status similarity views pseudo_diff address_a address_b",
+    defaults=(None, None),
 )
 
 # `engines` lists only the engines that succeeded, so an empty `changes` with a
@@ -456,28 +462,32 @@ def _read_diaphora(result, export_old, export_new):
     changes = []
     con = sqlite3.connect(result)
     try:
-        matched = con.execute("select name, name2, ratio from results").fetchall()
-        unmatched = con.execute("select type, name from unmatched").fetchall()
+        matched = con.execute(
+            "select name, name2, ratio, address, address2 from results").fetchall()
+        unmatched = con.execute("select type, name, address from unmatched").fetchall()
     finally:
         con.close()
     code_old = _pseudocode(export_old)
     code_new = _pseudocode(export_new)
-    for name, name2, ratio in matched:
+    for name, name2, ratio, address, address2 in matched:
         similarity = float(ratio)
         if similarity >= 1.0:
             continue
         changes.append(FunctionChange(name, name2, "modified", similarity,
                                       {"diaphora": "modified"},
                                       _unified(name, name2, code_old.get(name),
-                                               code_new.get(name2))))
-    for kind, name in unmatched:
+                                               code_new.get(name2)),
+                                      _hex(address), _hex(address2)))
+    for kind, name, address in unmatched:
         if kind == "primary":
             changes.append(FunctionChange(name, None, "removed", None,
                                           {"diaphora": "removed"},
-                                          _unified(name, None, code_old.get(name), None)))
+                                          _unified(name, None, code_old.get(name), None),
+                                          _hex(address), None))
         elif kind == "secondary":
             changes.append(FunctionChange(None, name, "added", None, {"diaphora": "added"},
-                                          _unified(None, name, None, code_new.get(name))))
+                                          _unified(None, name, None, code_new.get(name)),
+                                          None, _hex(address)))
     return changes
 
 
@@ -577,15 +587,18 @@ def _read_bindiff(result, export_old, export_new):
         if similarity >= 1.0:
             continue
         changes.append(FunctionChange(funcs_old.get(address1, name1), funcs_new.get(address2, name2),
-                                      "modified", similarity, {"bindiff": "modified"}, None))
+                                      "modified", similarity, {"bindiff": "modified"}, None,
+                                      address1, address2))
     matched_old = set(row[0] for row in rows)
     matched_new = set(row[2] for row in rows)
     for address, name in sorted(funcs_old.items()):
         if address not in matched_old:
-            changes.append(FunctionChange(name, None, "removed", None, {"bindiff": "removed"}, None))
+            changes.append(FunctionChange(name, None, "removed", None, {"bindiff": "removed"},
+                                          None, address, None))
     for address, name in sorted(funcs_new.items()):
         if address not in matched_new:
-            changes.append(FunctionChange(None, name, "added", None, {"bindiff": "added"}, None))
+            changes.append(FunctionChange(None, name, "added", None, {"bindiff": "added"},
+                                          None, None, address))
     return changes
 
 
@@ -701,7 +714,8 @@ def _read_ghidriff(pdiff):
             before.get("name"), after.get("name"), "modified",
             None if ratio is None else float(ratio), {"ghidriff": "modified"},
             _unified(before.get("name"), after.get("name"), before.get("code"),
-                     after.get("code"))))
+                     after.get("code")),
+            _hex(before.get("address")), _hex(after.get("address"))))
     for key, status in (("deleted", "removed"), ("added", "added")):
         for item in functions.get(key) or []:
             if item.get("external"):
@@ -709,8 +723,11 @@ def _read_ghidriff(pdiff):
             name = item.get("name")
             pair = (name, None) if status == "removed" else (None, name)
             code_pair = (item.get("code"), None) if status == "removed" else (None, item.get("code"))
+            address = _hex(item.get("address"))
             changes.append(FunctionChange(pair[0], pair[1], status, None, {"ghidriff": status},
-                                          _unified(pair[0], pair[1], code_pair[0], code_pair[1])))
+                                          _unified(pair[0], pair[1], code_pair[0], code_pair[1]),
+                                          address if status == "removed" else None,
+                                          address if status == "added" else None))
     return changes
 
 
@@ -720,32 +737,53 @@ def _read_ghidriff(pdiff):
 def _merge(found):
     """One entry per function across engines, with each engine's view kept.
 
-    Keyed by the old name, else the new one, with disassembler default names
-    reduced to their address (see _merge_key). An engine that ran and does not list a
-    function matched it as identical, so its view is "unchanged" — that is what
-    makes a disagreement visible. The merged status is the first engine's (in
-    ENGINES order) that saw a change; similarity is the lowest any engine gave,
-    the conservative reading.
+    Two passes. First, findings are keyed by the function's old address (else its
+    new address, else its name; see _merge_key), so engines that name a function
+    differently still meet. Second, an entry known only on the new side ("added")
+    folds into an entry whose new address is the same: one engine saw a function
+    appear at Y where another saw an old function change and land at Y. That is
+    one function the engines read differently, not two functions; one row with
+    both views is what the reviewer needs.
+
+    An engine that ran and does not list a function matched it as identical, so
+    its view is "unchanged" — that is what makes a disagreement visible. The
+    merged status is the first engine's (in ENGINES order) that saw a change;
+    similarity is the lowest any engine gave, the conservative reading.
     """
     merged = collections.OrderedDict()
     ran = [name for name in ENGINES if name in found]
     for engine in ran:
         for change in found[engine]:
-            key = _merge_key(change.name_a or change.name_b)
+            key = _merge_key(change)
             current = merged.get(key)
-            if current is None:
-                merged[key] = change._replace(views=dict(change.views))
-                continue
-            views = dict(current.views)
-            views.update(change.views)
-            similarity = current.similarity
-            if change.similarity is not None:
-                similarity = (change.similarity if similarity is None
-                              else min(similarity, change.similarity))
-            merged[key] = current._replace(
-                similarity=similarity, views=views,
-                pseudo_diff=current.pseudo_diff or change.pseudo_diff,
-                name_b=current.name_b or change.name_b)
+            merged[key] = (change._replace(views=dict(change.views)) if current is None
+                           else _combine(current, change))
+
+    by_new = {}
+    for key, change in merged.items():
+        if change.address_a is not None and change.address_b is not None:
+            by_new.setdefault(change.address_b, key)
+    for key in list(merged):
+        change = merged[key]
+        if change.address_a is not None or change.address_b is None:
+            continue
+        target = by_new.get(change.address_b)
+        if target is None or target == key:
+            continue
+        target_views = merged[target].views
+        common = set(change.views) & set(target_views)
+        # An engine that already placed something at Y (modified X->Y, or added Y)
+        # is saying these are two functions. One whose only view so far is
+        # "removed at X" read the same function as removed-then-added.
+        if any(target_views[engine] != "removed" for engine in common):
+            continue
+        combined = _combine(merged[target], change)
+        views = dict(combined.views)
+        for engine in common:
+            views[engine] = "removed+added"
+        merged[target] = combined._replace(views=views)
+        del merged[key]
+
     result = []
     for change in merged.values():
         views = dict((engine, change.views.get(engine, "unchanged")) for engine in ran)
@@ -756,15 +794,54 @@ def _merge(found):
     return result
 
 
+def _combine(current, change):
+    """Fold one engine's finding into an existing entry for the same function."""
+    views = dict(current.views)
+    for engine, status in change.views.items():
+        views.setdefault(engine, status)
+    similarity = current.similarity
+    if change.similarity is not None:
+        similarity = (change.similarity if similarity is None
+                      else min(similarity, change.similarity))
+    return current._replace(
+        similarity=similarity, views=views,
+        pseudo_diff=current.pseudo_diff or change.pseudo_diff,
+        name_a=current.name_a or change.name_a,
+        name_b=current.name_b or change.name_b,
+        address_a=current.address_a if current.address_a is not None else change.address_a,
+        address_b=current.address_b if current.address_b is not None else change.address_b)
+
+
 # Default names for functions without a symbol: IDA and BinExport write
-# sub_14007D650, Ghidra writes FUN_14007d650. The same function, so for merging
-# they are the address they encode.
+# sub_14007D650, Ghidra writes FUN_14007d650. When an engine gives no address,
+# such a name is the address, and keys the same way.
 _DEFAULT_NAME = re.compile(r"^(?:sub|FUN)_([0-9A-Fa-f]+)$")
 
 
-def _merge_key(name):
-    match = _DEFAULT_NAME.match(name or "")
-    return int(match.group(1), 16) if match else name
+def _merge_key(change):
+    """("a", old address), else ("b", new address), else ("n", name)."""
+    if change.address_a is not None:
+        return ("a", change.address_a)
+    if change.address_b is not None and change.name_a is None:
+        return ("b", change.address_b)
+    for side, name in (("a", change.name_a), ("b", change.name_b)):
+        if name:
+            match = _DEFAULT_NAME.match(name)
+            return (side, int(match.group(1), 16)) if match else ("n", name)
+    return ("n", None)
+
+
+def _hex(value):
+    """An address as an int: Diaphora's "00401000", Ghidra's "140001000" or
+    "ram:140001000", or already an int. None when absent or unreadable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).split(":")[-1], 16)
+    except ValueError:
+        return None
 
 
 _ADAPTERS = {

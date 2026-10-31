@@ -22,6 +22,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.binengines import (
+    _hex,
     ENGINES,
     _binexport_functions,
     _merge,
@@ -458,14 +459,14 @@ class FakeEngines:
              "nodes1, nodes2, description)", None),
             ("create table unmatched (type, line, address, name)", None),
             ("insert into results values (?,?,?,?,?,?,?,?,?,?)", [
-                ("best", "00000", "00401000", "same", "00401000", "same", "1.000", 1, 1,
+                ("best", "00000", "00001200", "same", "00001200", "same", "1.000", 1, 1,
                  "Same name"),
-                ("partial", "00001", "00401100", "parse", "00401100", "parse", "0.750", 3, 4,
+                ("partial", "00001", "00001000", "parse", "00001000", "parse", "0.750", 3, 4,
                  "Pseudo-code fuzzy hash"),
             ]),
             ("insert into unmatched values (?,?,?,?)", [
-                ("primary", "00000", "00402000", "legacy"),
-                ("secondary", "00000", "00403000", "fresh"),
+                ("primary", "00000", "00001100", "legacy"),
+                ("secondary", "00000", "00001180", "fresh"),
             ]),
         ])
         return 0, "diffed\n"
@@ -890,21 +891,21 @@ class TwoEngines(BinDiffSetup):
 # --- ghidriff -------------------------------------------------------------------
 
 
-def esym(name, code, external=False):
+def esym(name, code, external=False, address="1000"):
     """The shape ghidriff gives one function (its esym record), trimmed to what is read."""
     return {"name": name, "fullname": name, "code": code, "external": external,
-            "address": "140001000"}
+            "address": address}
 
 
 PDIFF = {
     "functions": {
-        "added": [esym("fresh", "int fresh(int x)\n{\n  return x * 2;\n}\n"),
-                  esym("ImportedThing", "", external=True)],
-        "deleted": [esym("legacy", "void legacy(void)\n{\n}\n")],
+        "added": [esym("fresh", address="1180", code="int fresh(int x)\n{\n  return x * 2;\n}\n"),
+                  esym("ImportedThing", "", external=True, address="9000")],
+        "deleted": [esym("legacy", address="1100", code="void legacy(void)\n{\n}\n")],
         "modified": [
             {"old": esym("parse", OLD_CODE["parse"]), "new": esym("parse", NEW_CODE["parse"]),
              "diff": "(whole-function diff)", "diff_type": ["code", "length"], "ratio": 0.71},
-            {"old": esym("moved", "x"), "new": esym("moved", "x"),
+            {"old": esym("moved", "x", address="1500"), "new": esym("moved", "x", address="1580"),
              "diff": "", "diff_type": ["address", "refcount"], "ratio": 1.0},
         ],
     },
@@ -1174,6 +1175,80 @@ class IgnoreStringsConfig(unittest.TestCase):
         code, err = self._main_with({"match": ["*.exe"], "normalize": [BINARY_STEP],
                                      "ignore_strings": [42]})
         self.assertEqual(code, 2)
+
+
+# --- merging by address (stage 6) -------------------------------------------------
+
+
+def fc(engine, status, name_a=None, name_b=None, a=None, b=None, similarity=None):
+    return FunctionChange(name_a, name_b, status, similarity, {engine: status}, None, a, b)
+
+
+class MergeByAddress(unittest.TestCase):
+    def test_differently_named_functions_meet_at_their_address(self):
+        merged = _merge({
+            "diaphora": [fc("diaphora", "modified", "parse_number", "parse_number",
+                            0x401000, 0x401000, 0.8)],
+            "ghidriff": [fc("ghidriff", "modified", "FUN_00401000", "FUN_00401000",
+                            0x401000, 0x401000, 0.7)],
+        })
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].name_a, "parse_number")          # first engine's name
+        self.assertEqual(merged[0].views, {"diaphora": "modified", "ghidriff": "modified"})
+        self.assertAlmostEqual(merged[0].similarity, 0.7)
+
+    def test_added_at_y_folds_into_modified_x_to_y(self):
+        # bindiff: old function at X changed and now sits at Y;
+        # ghidriff: did not match it, so it reports something removed at X and
+        # something added at Y. One function, read two ways: one row.
+        merged = _merge({
+            "bindiff": [fc("bindiff", "modified", "sub_1000", "sub_2000", 0x1000, 0x2000, 0.6)],
+            "ghidriff": [fc("ghidriff", "removed", "FUN_00001000", None, 0x1000, None),
+                         fc("ghidriff", "added", None, "FUN_00002000", None, 0x2000)],
+        })
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].views["bindiff"], "modified")
+        self.assertEqual(merged[0].views["ghidriff"], "removed+added")
+        self.assertEqual((merged[0].address_a, merged[0].address_b), (0x1000, 0x2000))
+
+    def test_one_engine_on_both_sides_is_two_functions(self):
+        # The same engine saw X modified to Y and, separately, a new function at Y:
+        # that cannot be one function, so it is not folded.
+        merged = _merge({
+            "bindiff": [fc("bindiff", "modified", "a", "a", 0x1000, 0x2000, 0.5),
+                        fc("bindiff", "added", None, "b", None, 0x2000)],
+        })
+        self.assertEqual(len(merged), 2)
+
+    def test_removed_and_added_at_the_same_address_stay_apart(self):
+        merged = _merge({
+            "bindiff": [fc("bindiff", "removed", "old", None, 0x3000, None),
+                        fc("bindiff", "added", None, "new", None, 0x3000)],
+        })
+        self.assertEqual(sorted(c.status for c in merged), ["added", "removed"])
+
+    def test_engines_without_addresses_still_merge_by_default_name(self):
+        merged = _merge({
+            "bindiff": [FunctionChange("sub_14007D650", None, "removed", None,
+                                       {"bindiff": "removed"}, None)],
+            "ghidriff": [fc("ghidriff", "removed", "FUN_14007d650", None, 0x14007D650, None)],
+        })
+        self.assertEqual(len(merged), 1)
+
+    def test_address_text_forms(self):
+        self.assertEqual(_hex("00401000"), 0x401000)
+        self.assertEqual(_hex("ram:140001000"), 0x140001000)
+        self.assertEqual(_hex(0x10), 0x10)
+        self.assertIsNone(_hex(""))
+        self.assertIsNone(_hex("not-hex"))
+        self.assertIsNone(_hex(None))
+
+    def test_json_carries_addresses(self):
+        found = FunctionDiff(["bindiff"], [fc("bindiff", "modified", "f", "f", 0x10, 0x20, 0.5)], [])
+        payload = build_json("v1", "v2", binary_comparison({"a.exe": ("M", ["a.exe"])}), {}, None,
+                             functions={"a.exe": found})
+        change = payload["real"][0]["binary_functions"]["changes"][0]
+        self.assertEqual((change["address_a"], change["address_b"]), (0x10, 0x20))
 
 
 if __name__ == "__main__":

@@ -385,6 +385,13 @@ verdict is kept, an engine that matched a function as identical counts as
 `unchanged`, and the report marks a function the engines **disagree** on — that is
 where a human should look first. The similarity shown is the lowest any engine gave.
 
+Findings meet by the function's **address**, not its name: IDA calls an unnamed
+function `sub_401000`, Ghidra `FUN_00401000`, and a real symbol may be named
+differently again. When one engine says a function changed and moved from X to
+Y while another says something was added at Y, that is shown as one function
+read two ways (the second engine's view is `removed+added` when it also reported
+X as removed), not as two unrelated rows.
+
 ```json
 "binary": {
   "engines": ["diaphora", "bindiff", "ghidriff"],
