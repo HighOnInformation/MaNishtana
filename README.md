@@ -355,6 +355,7 @@ optional; whichever are installed run, the rest are skipped with one warning.
 |---|---|---|
 | `diaphora` | IDA (`idat64`/`idat`) and [Diaphora](https://github.com/joxeankoret/diaphora)'s `diaphora.py`; Hex-Rays for pseudo-code | function matches with a similarity ratio, and a decompiled diff per changed function |
 | `bindiff` | [BinDiff](https://github.com/google/bindiff) 8 (`bindiff`), and BinExport for IDA **or** for Ghidra (the BinDiff installer ships both) | function matches with similarity, from graph structure; no pseudo-code |
+| `ghidriff` | [ghidriff](https://github.com/clearbluejar/ghidriff) (a pip package, in its own virtualenv) and Ghidra — no IDA licence needed | added, removed and modified functions with Ghidra's decompiled C |
 
 When several engines run, their findings are merged per function. Each engine's
 verdict is kept, an engine that matched a function as identical counts as
@@ -363,13 +364,14 @@ where a human should look first. The similarity shown is the lowest any engine g
 
 ```json
 "binary": {
-  "engines": ["diaphora", "bindiff"],
+  "engines": ["diaphora", "bindiff", "ghidriff"],
   "ida": "C:/Program Files/IDA Professional 9.1",
   "diaphora": "C:/tools/diaphora",
   "python": "",
   "bindiff": "C:/Program Files/BinDiff",
   "ghidra": "C:/tools/ghidra_12.2_PUBLIC",
   "java": "C:/tools/jdk-25",
+  "ghidriff": "C:/tools/ghidriff-venv",
   "timeout_sec": 1800,
   "max_functions": 200,
   "max_decompiled": 30
@@ -385,7 +387,9 @@ and the user plugin directory; the Ghidra extension in Ghidra's `Ghidra/Extensio
 and the user's extension directory. BinDiff prefers IDA's exporter when both are
 present: the Ghidra one is documented as experimental. `java` is a JDK for Ghidra
 only, passed as `JAVA_HOME` to Ghidra runs — **Ghidra 12 needs Java 25 or newer**,
-often newer than the machine's default. `python` runs Diaphora's diff step, which happens outside
+often newer than the machine's default. `ghidriff` is the command or the
+virtualenv holding it; ghidriff runs with `--no-symbols`, because it would otherwise
+try to download PDBs from a symbol server. `python` runs Diaphora's diff step, which happens outside
 IDA; empty means the interpreter running MaNishtana. `timeout_sec` applies to each
 IDA run. `max_functions` caps the table in the report (JSON always has them all);
 `max_decompiled` caps how many of the most changed functions' pseudo-code go to the
@@ -541,6 +545,9 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
   Ghidra exits 0 even when the export script fails, so MaNishtana judges success
   by whether the export file exists. Each side takes about a minute for a 1 MB
   binary, so set `timeout_sec` generously for large ones.
+- **ghidriff 1.0.0 needs a three-line fix for Ghidra 12**, and it does not report
+  operand-only changes. Both are covered in
+  [`docs/worklog/ghidriff-ghidra12/`](docs/worklog/ghidriff-ghidra12/README.md).
 - **Function names are what the disassembler recovers.** On a stripped binary they
   are `sub_401000`-style addresses, and a function that moved is matched by
   structure, not by name.

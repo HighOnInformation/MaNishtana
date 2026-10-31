@@ -144,13 +144,14 @@ _DEFAULT_NORMALIZERS = {
 # config, not code, because on Windows IDA is rarely on PATH and the air-gapped
 # box decides where things are installed.
 _DEFAULT_BINARY = {
-    "engines": ["diaphora", "bindiff"],
+    "engines": ["diaphora", "bindiff", "ghidriff"],
     "ida": "",
     "diaphora": "",
     "python": "",
     "bindiff": "",
     "ghidra": "",
     "java": "",
+    "ghidriff": "",
     "timeout_sec": 1800,
     "max_functions": 200,
     "max_decompiled": 30,

@@ -1,0 +1,35 @@
+diff --git a/ghidriff/ghidra_diff_engine.py b/ghidriff/ghidra_diff_engine.py
+index 34b394b..9ee4f86 100644
+--- a/ghidriff/ghidra_diff_engine.py
++++ b/ghidriff/ghidra_diff_engine.py
+@@ -843,7 +843,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
+             print('Enabling verbose gdt..')
+             monitor = ConsoleTaskMonitor()
+         else:
+-            monitor = ConsoleTaskMonitor().DUMMY_MONITOR
++            monitor = __import__("ghidra.util.task", fromlist=["TaskMonitor"]).TaskMonitor.DUMMY
+ 
+         archiveGDT = File(gdt_path)
+         archiveDTM = FileDataTypeManager.openFileArchive(archiveGDT, False)
+diff --git a/ghidriff/version_tracking_diff.py b/ghidriff/version_tracking_diff.py
+index 7b0bdd5..7e3506b 100644
+--- a/ghidriff/version_tracking_diff.py
++++ b/ghidriff/version_tracking_diff.py
+@@ -158,7 +158,7 @@ class VersionTrackingDiff(GhidraDiffEngine):
+             
+ 
+             # kill noisy monitor after first run
+-            monitor = ConsoleTaskMonitor().DUMMY_MONITOR
++            monitor = __import__("ghidra.util.task", fromlist=["TaskMonitor"]).TaskMonitor.DUMMY
+ 
+         # Log current counts
+         self.logger.info(Counter([tuple(x) for x in matches.values()]))
+@@ -277,7 +277,7 @@ class VersionTrackingDiff(GhidraDiffEngine):
+             if hasattr(hasher, 'DEBUG'):
+                 hasher.DEBUG = True
+ 
+-            dummy = ConsoleTaskMonitor().DUMMY_MONITOR
++            dummy = __import__("ghidra.util.task", fromlist=["TaskMonitor"]).TaskMonitor.DUMMY
+             dummy.cancel()
+ 
+             p1_hashes_seen = {}

@@ -10,6 +10,7 @@ can say exactly which bytes changed and which must not have.
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.binengines import (
+    ENGINES,
     _binexport_functions,
     _merge,
     FunctionChange,
@@ -872,6 +874,119 @@ class TwoEngines(BinDiffSetup):
                           functions={"a.exe": found})
         self.assertIn("modified ⚠ engines disagree", md)
         self.assertIn("bindiff: unchanged, diaphora: modified", md)
+
+
+# --- ghidriff -------------------------------------------------------------------
+
+
+def esym(name, code, external=False):
+    """The shape ghidriff gives one function (its esym record), trimmed to what is read."""
+    return {"name": name, "fullname": name, "code": code, "external": external,
+            "address": "140001000"}
+
+
+PDIFF = {
+    "functions": {
+        "added": [esym("fresh", "int fresh(int x)\n{\n  return x * 2;\n}\n"),
+                  esym("ImportedThing", "", external=True)],
+        "deleted": [esym("legacy", "void legacy(void)\n{\n}\n")],
+        "modified": [
+            {"old": esym("parse", OLD_CODE["parse"]), "new": esym("parse", NEW_CODE["parse"]),
+             "diff": "(whole-function diff)", "diff_type": ["code", "length"], "ratio": 0.71},
+            {"old": esym("moved", "x"), "new": esym("moved", "x"),
+             "diff": "", "diff_type": ["address", "refcount"], "ratio": 1.0},
+        ],
+    },
+    "stats": {"added_funcs_len": 2, "deleted_funcs_len": 1, "modified_funcs_len": 2},
+}
+
+
+class FakeGhidriff:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def __call__(self, argv, cwd, env, timeout):
+        self.calls.append((list(argv), env))
+        if self.fail:
+            return 1, "Exception: JVM not found\n"
+        out = os.path.join(argv[argv.index("-o") + 1], "json")
+        os.makedirs(out)
+        with open(os.path.join(out, "old_x-new_x.ghidriff.json"), "w") as handle:
+            json.dump(PDIFF, handle)
+        with open(os.path.join(out, "old_x-new_x.ghidriff.matches.json"), "w") as handle:
+            json.dump({"address_matches": []}, handle)
+        return 0, "done\n"
+
+
+class GhidriffSetup(BinDiffSetup):
+    def setUp(self):
+        super(GhidriffSetup, self).setUp()
+        venv = os.path.join(self.work, "ghidriff-venv", "Scripts")
+        os.makedirs(venv)
+        open(os.path.join(venv, "ghidriff.exe"), "wb").close()
+        self.binary = load_settings({"binary": {
+            "ida": self.ida_dir, "diaphora": os.path.dirname(self.diaphora), "python": "py3",
+            "bindiff": self.bindiff_dir, "ghidra": self.ghidra, "java": "/jdk25",
+            "ghidriff": os.path.dirname(venv)}}, ".").binary
+        self.tools = discover(self.binary)
+
+
+class GhidriffAdapter(GhidriffSetup):
+    def test_found_in_a_virtualenv_directory(self):
+        self.assertTrue(self.tools["ghidriff"].endswith("ghidriff.exe"))
+        self.assertEqual(runnable(self.tools), ["diaphora", "bindiff", "ghidriff"])
+        self.assertNotIn("ghidriff", runnable(dict(self.tools, ghidra=None)))
+
+    def test_code_changes_only_and_no_imports(self):
+        found = diff_functions(self.old, self.new, ["ghidriff"], self.tools, self.binary,
+                               run=FakeGhidriff())
+        self.assertEqual(found.engines, ["ghidriff"])
+        summary = sorted((c.status, c.name_a, c.name_b) for c in found.changes)
+        self.assertEqual(summary, [("added", None, "fresh"), ("modified", "parse", "parse"),
+                                   ("removed", "legacy", None)])
+        parse = [c for c in found.changes if c.status == "modified"][0]
+        self.assertAlmostEqual(parse.similarity, 0.71)
+        self.assertIn("+  if (!s)", parse.pseudo_diff)
+        self.assertNotIn("whole-function", parse.pseudo_diff)   # rebuilt with 3 lines context
+
+    def test_command_line_and_environment(self):
+        fake = FakeGhidriff()
+        diff_functions(self.old, self.new, ["ghidriff"], self.tools, self.binary, run=fake)
+        argv, env = fake.calls[0]
+        self.assertIn("--no-symbols", argv)   # never reach for a symbol server
+        self.assertTrue(os.path.basename(argv[-2]).startswith("old_"))
+        self.assertTrue(os.path.basename(argv[-1]).startswith("new_"))
+        self.assertEqual(env["GHIDRA_INSTALL_DIR"], self.tools["ghidra"])
+        self.assertEqual(env["JAVA_HOME"], "/jdk25")
+
+    def test_failure_is_a_note(self):
+        found = diff_functions(self.old, self.new, ["ghidriff"], self.tools, self.binary,
+                               run=FakeGhidriff(fail=True))
+        self.assertEqual(found.engines, [])
+        self.assertIn("JVM not found", found.notes[0])
+
+
+class ThreeEngines(GhidriffSetup):
+    def test_all_three_merge(self):
+        fakes = {"diaphora": FakeEngines(), "bindiff": FakeBinDiff(), "ghidriff": FakeGhidriff()}
+
+        def run(argv, cwd, env, timeout):
+            if "DIAPHORA_AUTO" in env or argv[0] == "py3":
+                return fakes["diaphora"](argv, cwd, env, timeout)
+            if "--no-symbols" in argv:
+                return fakes["ghidriff"](argv, cwd, env, timeout)
+            return fakes["bindiff"](argv, cwd, env, timeout)
+
+        found = diff_functions(self.old, self.new, list(ENGINES), self.tools, self.binary,
+                               run=run)
+        self.assertEqual(found.engines, ["diaphora", "bindiff", "ghidriff"])
+        parse = [c for c in found.changes if c.name_a == "parse"][0]
+        self.assertEqual(parse.views, {"diaphora": "modified", "bindiff": "modified",
+                                       "ghidriff": "modified"})
+        self.assertAlmostEqual(parse.similarity, 0.62)
+        fresh = [c for c in found.changes if c.name_b == "fresh"][0]
+        self.assertEqual(set(fresh.views.values()), {"added"})
 
 
 if __name__ == "__main__":

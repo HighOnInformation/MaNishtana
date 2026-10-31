@@ -18,6 +18,10 @@ Each engine is an adapter that turns one tool's native output into FunctionChang
                bindiff matches them; matches are read from the .BinDiff SQLite and
                the function lists from the .BinExport protobufs, because BinDiff
                records matched functions only and added/removed are the rest.
+    ghidriff   ghidriff (headless Ghidra through pyghidra) diffs the pair in one run;
+               its JSON carries added, deleted and modified functions with Ghidra's
+               decompiled C. Run with --no-symbols: it would otherwise fetch PDBs
+               from the network, which an air-gapped box does not have.
 
 `status` is "modified", "added" or "removed". `views` is {engine: status} for every
 engine that ran, with "unchanged" for an engine that matched the function and found
@@ -37,6 +41,7 @@ writes its database next to the input and the input is someone else's tree.
 import collections
 import difflib
 import glob
+import json
 import os
 import shutil
 import sqlite3
@@ -45,7 +50,7 @@ import subprocess
 import sys
 import tempfile
 
-ENGINES = ("diaphora", "bindiff")
+ENGINES = ("diaphora", "bindiff", "ghidriff")
 
 FunctionChange = collections.namedtuple(
     "FunctionChange", "name_a name_b status similarity views pseudo_diff"
@@ -61,6 +66,7 @@ FunctionDiff = collections.namedtuple("FunctionDiff", "engines changes notes")
 _NEEDS = {
     "diaphora": [("idat", "diaphora")],
     "bindiff": [("bindiff", "idat", "binexport_ida"), ("bindiff", "ghidra", "binexport_ghidra")],
+    "ghidriff": [("ghidriff", "ghidra")],
 }
 
 _TOOL_LABELS = (
@@ -72,6 +78,7 @@ _TOOL_LABELS = (
     ("binexport_ida", "BinExport plugin for IDA"),
     ("ghidra", "Ghidra (analyzeHeadless)"),
     ("binexport_ghidra", "BinExport extension for Ghidra"),
+    ("ghidriff", "ghidriff"),
     ("java", "JDK for Ghidra (binary.java)"),
 )
 
@@ -116,6 +123,7 @@ def discover(binary):
     tools["binexport_ida"] = _find_binexport_ida(tools["idat"])
     tools["ghidra"] = _find_ghidra(binary.get("ghidra"), os.environ.get("GHIDRA_INSTALL_DIR"))
     tools["binexport_ghidra"] = _find_binexport_ghidra(tools["ghidra"])
+    tools["ghidriff"] = _find_ghidriff(binary.get("ghidriff"))
     # A JDK for Ghidra only. Ghidra 12 needs Java 25+, often newer than the box's
     # default; this goes to JAVA_HOME for Ghidra runs and changes nothing else.
     tools["java"] = binary.get("java") or None
@@ -323,6 +331,18 @@ def _find_binexport_ghidra(ghidra):
     return None
 
 
+def _find_ghidriff(given):
+    """The ghidriff command: a file, or a directory such as a virtualenv."""
+    if given:
+        if os.path.isfile(given):
+            return os.path.abspath(given)
+        for sub in ("", "Scripts", "bin"):
+            found = _in_dir(os.path.join(given, sub), ["ghidriff"])
+            if found:
+                return found
+    return shutil.which("ghidriff")
+
+
 def _find_file(given, env_dir, filename):
     for place in (given, env_dir):
         if not place:
@@ -360,7 +380,16 @@ def _env_for(tools, ghidra=False):
     env = dict(os.environ)
     if ghidra and tools.get("java"):
         env["JAVA_HOME"] = tools["java"]
+    if ghidra and tools.get("ghidra"):
+        env["GHIDRA_INSTALL_DIR"] = tools["ghidra"]
     return env
+
+
+def _stage_as(path, directory, prefix):
+    os.makedirs(directory, exist_ok=True)
+    copy = os.path.join(directory, prefix + os.path.basename(path))
+    shutil.copyfile(path, copy)
+    return copy
 
 
 def _stage(path, directory):
@@ -625,6 +654,65 @@ def _varint(data, at):
         shift += 7
 
 
+# --- internals: ghidriff -----------------------------------------------------
+
+
+def _ghidriff(old, new, tools, run, work, timeout):
+    """One ghidriff run over the pair; its JSON is read into FunctionChange.
+
+    The two copies get distinct names (old_*, new_*): ghidriff imports both into
+    one Ghidra project, and two programs with one name would collide there.
+    """
+    copy_old = _stage_as(old, os.path.join(work, "in"), "old_")
+    copy_new = _stage_as(new, os.path.join(work, "in"), "new_")
+    out = os.path.join(work, "out")
+    argv = [tools["ghidriff"], "--no-symbols", "-o", out,
+            "-p", os.path.join(work, "projects"), "-s", os.path.join(work, "symbols"),
+            "-g", os.path.join(work, "gzfs"), "--log-path", os.path.join(work, "ghidriff.log"),
+            copy_old, copy_new]
+    code, output = run(argv, work, _env_for(tools, ghidra=True), timeout)
+    results = [path for path in glob.glob(os.path.join(out, "json", "*.json"))
+               if not path.endswith(".matches.json")]
+    if code != 0 or not results:
+        return None, "ghidriff failed (%s) %s" % (
+            "exit %s" % code if code is not None else output, _tail(output))
+    with open(results[0], "r", encoding="utf-8") as handle:
+        return _read_ghidriff(json.load(handle)), None
+
+
+def _read_ghidriff(pdiff):
+    """ghidriff's JSON to FunctionChange.
+
+    `modified` also lists functions whose only difference is their address, name
+    or reference count; those are not code changes and are left out unless the
+    decompiled code differs ('code' in diff_type, or a ratio below 1). External
+    symbols (imports) are not the binary's own functions.
+    """
+    functions = pdiff.get("functions") or {}
+    changes = []
+    for item in functions.get("modified") or []:
+        ratio = item.get("ratio")
+        kinds = item.get("diff_type") or []
+        if "code" not in kinds and (ratio is None or ratio >= 1.0):
+            continue
+        before, after = item.get("old") or {}, item.get("new") or {}
+        changes.append(FunctionChange(
+            before.get("name"), after.get("name"), "modified",
+            None if ratio is None else float(ratio), {"ghidriff": "modified"},
+            _unified(before.get("name"), after.get("name"), before.get("code"),
+                     after.get("code"))))
+    for key, status in (("deleted", "removed"), ("added", "added")):
+        for item in functions.get(key) or []:
+            if item.get("external"):
+                continue
+            name = item.get("name")
+            pair = (name, None) if status == "removed" else (None, name)
+            code_pair = (item.get("code"), None) if status == "removed" else (None, item.get("code"))
+            changes.append(FunctionChange(pair[0], pair[1], status, None, {"ghidriff": status},
+                                          _unified(pair[0], pair[1], code_pair[0], code_pair[1])))
+    return changes
+
+
 # --- internals: merging ------------------------------------------------------
 
 
@@ -669,4 +757,5 @@ def _merge(found):
 _ADAPTERS = {
     "diaphora": _diaphora,
     "bindiff": _bindiff,
+    "ghidriff": _ghidriff,
 }
