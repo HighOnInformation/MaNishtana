@@ -305,3 +305,122 @@ main. The newer prebuilt (for Ghidra 11.0.3) fails on Ghidra 12 with a
   air-gapped box, `--check-binary-tools` should list `BinExport plugin for IDA`
   (BinDiff's installer drops `binexport12_ida64.dll` into
   `BinDiff\Plugins\IDA Pro`; copy it into IDA's `plugins`).
+
+### Stage 4 — `feature/binary-ghidriff` (from `feature/binary-bindiff` @ `99a0d95`)
+
+**Goal:** a third engine, ghidriff, which needs Ghidra but no IDA licence.
+
+| Commit | What and why |
+|---|---|
+| `a528702` | ghidriff adapter, settings, tests, and the ghidriff-for-Ghidra-12 fix. |
+| `591bd96` | **Bug found by the real run:** default function names merge by address. |
+| (this commit) | Worklog, and the check scripts in `docs/worklog/checks/`. |
+
+**Intent of each change**
+
+1. **`binengines.py`**
+   - `ENGINES` gains `ghidriff`, which needs `ghidriff` and `ghidra`.
+   - `_find_ghidriff(given)` takes a file or a directory such as a virtualenv
+     (looking in `Scripts/` and `bin/`), then falls back to `PATH`.
+   - **Adapter:**
+     - It copies the two sides as `old_<name>` and `new_<name>`, since both go
+       into one Ghidra project.
+     - It runs
+       `ghidriff --no-symbols -o out -p projects -s symbols -g gzfs --log-path … old new`
+       with `GHIDRA_INSTALL_DIR` and `JAVA_HOME` set (`_env_for` sets both now).
+     - It reads `out/json/*.json`, skipping `*.matches.json`.
+   - **`_read_ghidriff`:**
+     - `modified` counts only when the code changed: `'code'` in `diff_type`, or
+       `ratio` < 1.
+     - `added`/`deleted` skip `external` symbols.
+     - The pseudo-code diff is rebuilt from `old.code`/`new.code` with 3 lines of
+       context. ghidriff's own `diff` uses 1000, which is the whole function.
+2. **`settings.py`**: `binary.ghidriff`. The default `engines` is now all three.
+3. **Tests**: `FakeGhidriff` writes ghidriff's JSON shape. The tests cover
+   virtualenv discovery, code-only modified, imports excluded, the 3-line diff,
+   `--no-symbols`, distinct copy names, the environment, a failure becoming a
+   note, and all three engines merged.
+4. **Docs**: the README row, config and limitation;
+   [`docs/worklog/ghidriff-ghidra12/`](ghidriff-ghidra12/README.md) with the
+   patch and offline install steps; [`docs/worklog/checks/`](checks/) with
+   `make_fixture.py` (builds the rebuild and patch fixture from any PE or ELF)
+   and `mock_llm.py` (records what the model is sent).
+
+**[Decided]** `--no-symbols` is always passed. Symbols would mean a network call
+to a symbol server, and the tool's home has no network. A local symbol store could
+be made configurable later, if wanted.
+
+**[Decided]** ghidriff 1.0.0 is patched (3 lines) rather than pinned to an older
+Ghidra. Ghidra 12.2 is current, and the patch only renames a constant Ghidra
+removed.
+
+**Verification (real tools, real binaries)**
+
+- Unit tests: 213 OK.
+- ghidriff 1.0.0 was installed with pip into `~/tools/ghidriff-venv`, which
+  brought pyghidra 3.2.0.
+- As released, on Ghidra 12.2:
+  `AttributeError: … ConsoleTaskMonitor … has no attribute 'DUMMY_MONITOR'`.
+  Upstream main still has it. With the patch, it runs.
+- **ghidriff found no change in `patched.exe`, where BinDiff found one modified
+  function.** ghidriff's rule adds a function to "modified" only if its mnemonics
+  or block structure changed, and a flipped operand byte changes neither. This is
+  an engine limitation, not an adapter bug. It is the case MaNishtana's
+  "engines disagree" flag exists for.
+- **Full CLI, both Ghidra engines plus the mock model** (`jq.exe` 1.7 → 1.7.1 and
+  `patched.exe`):
+  - **First run: found a merge bug.** BinExport names an unnamed function
+    `sub_14007D650` and Ghidra names it `FUN_14007d650`, so merging by name kept
+    the two apart. 141 of 142 functions were shown as "engines disagree" and
+    counted twice. Fix `591bd96`: names of the form `sub_<hex>` / `FUN_<hex>`
+    merge by the address they encode, and real names are untouched. Two unit
+    tests cover it.
+  - **Rerun after the fix (7m48s):**
+    - `jq.exe`: 82 functions. The engines agree on 60 (34 removed, 25 modified,
+      1 added) and disagree on 22. Those 22 are cases where one engine matched a
+      function the other calls added or removed, i.e. shifted function
+      boundaries. 74 entries carry ghidriff's decompiled C.
+    - `patched.exe`: 1 function, flagged `bindiff: modified, ghidriff:
+      unchanged`, as explained above.
+    - Model: 3 calls. `jq.exe`'s decompiled diff was larger than
+      `max_chars_per_call`, so it was split into 2 parts, each starting with the
+      binary header. Then 1 summary. `patched.exe` had no pseudo-code (BinDiff
+      gives none), so it stayed "not analysed" by the model, which is correct.
+
+---
+
+## Where it stands (2026-11-01)
+
+| Stage | Branch | Verified with real tools here | Still to verify on the air-gapped box |
+|---|---|---|---|
+| 1 Noise check | `feature/binary-noise` | Yes: jq PE and ELF, re-stamped copies, one-byte patch | A real double build of your own binary |
+| 2 Diaphora | `feature/binary-diaphora` | Diaphora's real diff step and the full pipeline, with IDA's export simulated | **A real IDA export** |
+| 3 BinDiff | `feature/binary-bindiff` | Yes, through Ghidra 12.2 with the patched BinExport | BinExport through IDA |
+| 4 ghidriff | `feature/binary-ghidriff` | Yes, Ghidra 12.2 with ghidriff patched | — |
+
+Tool versions used for the checks: Python 3.12.10 (the code stays 3.8-compatible),
+Ghidra 12.2 (`ghidra_12.2_PUBLIC_20261016`), Temurin JDK 25, BinDiff 8 with its
+BinExport 12 extension (patched), ghidriff 1.0.0 (patched) with pyghidra 3.2.0, and
+Diaphora at commit `35c7657`.
+
+### Checklist for the air-gapped box
+
+1. Replay the four stages (see *Replaying* above) and run the tests after each.
+2. Put a `binary` section in your config with the paths to IDA, Diaphora, BinDiff,
+   Ghidra, a JDK 25 for Ghidra, and the ghidriff virtualenv. Then run
+   `python -m manishtana --check-binary-tools -c config.json`. Every engine you
+   installed should say `ready`.
+3. If you use BinDiff through Ghidra 12, apply
+   [`binexport-ghidra12`](binexport-ghidra12/README.md). If you use ghidriff on
+   Ghidra 12, apply [`ghidriff-ghidra12`](ghidriff-ghidra12/README.md).
+4. Build a fixture:
+   `python docs/worklog/checks/make_fixture.py fx --pe old.exe new.exe --elf old new`.
+   Then run `python -m manishtana fx/v1 fx/v2 -c fx/config.json -o r.md --no-llm`.
+   Expect `rebuilt*` to be noise only and `patched.exe` and `changed*` to be
+   modified.
+5. Add your `binary` section to `fx/config.json` and run again. With IDA present,
+   this is the first real Diaphora run. Check that the function table shows real
+   names and the decompiled diff looks like Hex-Rays output.
+6. Optional: start `python docs/worklog/checks/mock_llm.py 18765 requests.jsonl`,
+   set `llm.base_url` to `http://127.0.0.1:18765/v1`, and read `requests.jsonl` to
+   see exactly what the model would be sent before pointing at the real endpoint.
