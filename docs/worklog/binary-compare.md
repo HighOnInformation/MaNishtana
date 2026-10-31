@@ -213,3 +213,95 @@ deleted binary has nothing to diff against, so it gets layer 1 only.
      table should list real function names.
   3. If the export fails, the warning carries the last lines of IDA's output. The
      IDA log is in the temp directory while the run is going (it is deleted after).
+
+### Stage 3 — `feature/binary-bindiff` (from `feature/binary-diaphora` @ `940f508`)
+
+**Goal:** add BinDiff as a second engine, through IDA or Ghidra, and make engine
+disagreement visible.
+
+| Commit | What and why |
+|---|---|
+| `b773c33` | BinDiff adapter, the stdin fix, `binary.java`, and the BinExport-for-Ghidra-12 fix. |
+
+**Intent of each change**
+
+1. **`binengines.py`**
+   - `ENGINES` gains `bindiff`. `_NEEDS` becomes a list of *alternatives* per
+     engine: BinDiff needs `bindiff` plus either `idat` with `binexport_ida`, or
+     `ghidra` with `binexport_ghidra`. `_missing()` reports the nearest
+     alternative's missing tools.
+   - **Discovery:**
+     - `bindiff`: the config, then `BINDIFF_DIR`, then `C:\Program Files\BinDiff`
+       or `/opt/bindiff`, then `PATH`.
+     - `binexport_ida`: `binexport*_ida*` in IDA's `plugins`, `IDAUSR`,
+       `%APPDATA%\Hex-Rays\IDA Pro\plugins` or `~/.idapro/plugins`.
+     - `ghidra`: the config or `GHIDRA_INSTALL_DIR`, recognised by
+       `support/analyzeHeadless`.
+     - `binexport_ghidra`: `Ghidra/Extensions/BinExport/lib/BinExport*.jar` or the
+       user's extension directory.
+     - `java`: the new config key.
+   - **Adapter:**
+     - It prefers IDA:
+       `idat -A -OBinExportModule:<out> -OBinExportAutoAction:BinExportBinary <copy>`.
+     - Otherwise it uses Ghidra:
+       `analyzeHeadless <proj> p -import <copy> -scriptPath <dir> -postScript ManishtanaBinExport.java <out> -deleteProject`.
+       The post-script is the string `_GHIDRA_BINEXPORT_SCRIPT`, written to the
+       temp directory.
+     - Then it runs
+       `bindiff --primary=… --secondary=… --output_dir=… --output_format=bin`.
+     - It reads the `function` table (similarity < 1 means modified). Added and
+       removed come from the `.BinExport` call graphs (NORMAL functions only),
+       read by the stdlib protobuf reader (`_proto_fields`, `_varint`).
+   - **`_run` passes `stdin=DEVNULL`.** Found the hard way: Ghidra's launcher asked
+     for a JDK path and waited on "Press any key".
+   - `_env_for(tools, ghidra=True)` sets `JAVA_HOME` from `binary.java`.
+2. **`settings.py`**: `binary` gains `bindiff`, `ghidra` and `java`, and the
+   default `engines` becomes `["diaphora", "bindiff"]`.
+3. **Tests**: `FakeBinDiff` writes real protobuf bytes, encoded by `pb_field` in
+   the test, plus a `.BinDiff` table with BinDiff's real column list. The tests
+   cover discovery, either exporter being enough, IDA preferred, the Ghidra
+   post-script and `JAVA_HOME`, a failure becoming a note, the protobuf reader
+   (types, unnamed functions, 64-bit addresses, unknown fields), merging two
+   engines, the "unchanged" view, and the disagreement flag in the report.
+4. **Docs**: README rows and config, discovery rules, two limitations, and
+   [`docs/worklog/binexport-ghidra12/`](binexport-ghidra12/README.md) with the
+   patch and the rebuild steps.
+
+**[Decided]** BinDiff prefers IDA's exporter when both are present. BinExport's
+own README calls the Ghidra one experimental.
+
+**[Decided]** Added and removed functions count only `NORMAL` functions (not
+library, imported or thunk), so imports appearing or disappearing do not flood
+the table.
+
+**[Decided]** BinDiff 8's own BinExport is patched rather than built from upstream
+main. The newer prebuilt (for Ghidra 11.0.3) fails on Ghidra 12 with a
+`NoSuchMethodError`, and the old one needed one line.
+
+**Verification (real tools, real binaries)**
+
+- Unit tests: 208 OK.
+- **Tools installed for the check:**
+  - Ghidra 12.2 (zip from GitHub, unpacked to `~/tools`).
+  - Temurin JDK 25 (zip). Ghidra 12 refuses JDK 21.
+  - BinDiff 8 (MSI, unpacked with `msiexec /a`, no install).
+- **BinExport on Ghidra 12.2**, three attempts:
+  1. As shipped, with only `version=12.2` set: it loaded and ran, then threw a
+     `NullPointerException` in `buildFlowGraphs`.
+  2. The newer release: `NoSuchMethodError` (`DefinedDataIterator.definedStrings`).
+  3. The shipped one with the one-line fix: works. Each side of jq exported in
+     about 65 s.
+- Ghidra exits 0 when the post-script fails, so the adapter judges success by
+  whether the export file exists. That is correct; it caught the failure above.
+- **Real `.BinDiff` database:** the tables are `function`, `basicblock`,
+  `instruction`, `file`, `metadata` and the two algorithm tables. The `function`
+  columns are exactly as read. The protobuf reader parsed 949 NORMAL functions
+  from the real jq `.BinExport`. `binexport2dump` (from BinDiff) agrees on the file.
+- **Full CLI, `--no-llm`, engine bindiff (5m45s for two pairs):**
+  - `patched.exe` (one byte flipped at 0x1000): **1 modified** (`sub_140001910`,
+    0.98).
+  - `jq.exe` 1.7 → 1.7.1: **31 modified, 3 added, 35 removed**.
+- **Not verified here:** BinExport through IDA (no IDA on the dev box). On the
+  air-gapped box, `--check-binary-tools` should list `BinExport plugin for IDA`
+  (BinDiff's installer drops `binexport12_ida64.dll` into
+  `BinDiff\Plugins\IDA Pro`; copy it into IDA's `plugins`).
