@@ -122,3 +122,94 @@ of your own binaries (rebuild twice), put one in each tree, add the rule above, 
 expect `noise only`. If it says `modified`, the region list shows which bytes still
 differ: that is a noise field this step does not know yet. Typical causes are
 embedded build paths or `__DATE__`/`__TIME__` strings.
+
+### Stage 2 — `feature/binary-diaphora` (from `feature/binary-noise` @ `5213762`)
+
+**Goal:** for a binary that really changed, list the functions that changed, using
+IDA + Diaphora, and give the decompiled diff to the model.
+
+| Commit | What and why |
+|---|---|
+| `e16e68b` | Engine layer + Diaphora adapter. See intents below. |
+
+**Intent of each change**
+
+1. **New `manishtana/binengines.py`**: no dependencies inside the package.
+   - `discover(settings.binary)` → `{idat, hexrays, diaphora, python}`. The order
+     is config path (file or directory), then `IDADIR` / `DIAPHORA_DIR`, then
+     `PATH`, then `C:\Program Files\IDA*` on Windows. It prefers `idat64` over
+     `idat`, because before IDA 9 plain `idat` is the 32-bit build. Hex-Rays
+     counts as present when `plugins/hexx64*` or `plugins/hexrays*` exists.
+   - `runnable(tools)`, `describe_tools(tools)` (the `--check-binary-tools` text).
+   - `diff_functions(old, new, engines, tools, settings.binary, run=None)` →
+     `FunctionDiff(engines_that_succeeded, changes, notes)`.
+   - `FunctionChange(name_a, name_b, status, similarity, views, pseudo_diff)`.
+   - Diaphora adapter:
+     - It copies each side into a private temp directory.
+     - It runs `idat -A -B -S<diaphora.py> -L<log> <copy>` with
+       `DIAPHORA_AUTO=1`, `DIAPHORA_EXPORT_FILE`, and `DIAPHORA_USE_DECOMPILER=1`
+       if Hex-Rays was found.
+     - It then runs `python diaphora.py old.sqlite new.sqlite -o diff.sqlite`.
+     - It reads `results` (ratio < 1 means modified) and `unmatched` (`primary`
+       means removed, `secondary` means added), plus `functions.pseudocode` from
+       both exports.
+   - `_merge` is already multi-engine: one entry per function, `views` per
+     engine, "unchanged" for an engine that ran and did not list it. It was written
+     here rather than in stage 3 because the result type needed its final shape.
+   - `decompiled_diff(changes, limit)`: the most changed first, capped.
+2. **`settings.py`**:
+   - New `Settings.binary` section, validated like the others: `engines`, `ida`,
+     `diaphora`, `python`, `timeout_sec`, `max_functions`, `max_decompiled`.
+   - New prompt `decompiled_header`, which tells the model it is reading
+     decompiler output.
+3. **`cli.py`**:
+   - `--check-binary-tools` prints and exits 0.
+   - `--binary-engines LIST|none`. An unknown name is a usage error (exit 2).
+   - `_binary_functions` runs the usable engines on binaries present on both
+     sides, and warns once for engines that are missing.
+   - Binaries with pseudo-code get `decompiled_header + diff` as their section and
+     are removed from `binaries` in the comparison handed to `analyze_changes`.
+     `llm.py` is unchanged.
+   - Renderers get `functions`, `decompiled` and `max_functions`.
+4. **`output.py`**: the function table (with an "engines disagree" flag), the
+   "no function changed" case, the decompiled diff disclosure, and the binary's
+   model analysis. JSON gains `binary_functions`, still schema 3 (not released
+   between stages).
+5. **Tests** (`tests/test_binary.py`): `FakeEngines` stands in for `run` and
+   writes Diaphora-shaped SQLite. It covers discovery, classification, pseudo-code,
+   the exact command lines and environment, quoting of a path with spaces, no
+   Hex-Rays, a failed export, the decompiled-diff cap, rendering and the CLI flags.
+6. **Docs**: the README section on function-level comparison, JSON fields and
+   two limitations; the CLAUDE.md dependency line.
+
+**[Decided]** The default `binary.engines` is `["diaphora"]` in this stage. It
+widens as engines are added.
+
+**[Decided]** Engines run only on binaries present on both sides. An added or
+deleted binary has nothing to diff against, so it gets layer 1 only.
+
+**Verification**
+
+- Unit tests: 197 OK.
+- **Real Diaphora, fake IDA.** IDA is not on the dev box. Diaphora was cloned
+  (commit `35c7657`, 2026-10-25) and two export databases were built with
+  Diaphora's own schema (`db_support/schema.py`), each holding three functions.
+  Diaphora's real diff step (`python diaphora.py old.sqlite new.sqlite -o
+  diff.sqlite`) ran on them. It stores the ratio as text (`'1.0000000'`); the
+  adapter reads it correctly. Diaphora paired a removed function with an added one
+  as a rename (`legacy_dump → fresh_feature`, 0.846).
+- **Full pipeline.** A stand-in `idat64.bat` writes those exports when called with
+  Diaphora's protocol. The rest is real: the real Diaphora diff, the real jq
+  binaries for layer 1, and a mock OpenAI-compatible endpoint recording requests.
+  Results:
+  - The idat command line and environment were exactly as designed.
+  - The report shows the function table and the decompiled diff.
+  - The model got 5 calls (orientation, 3 binaries, summary), each per-file call
+    beginning with `decompiled_header` and then the pseudo-code diff.
+- **Not verified here:** a real IDA export. On the air-gapped box:
+  1. `python -m manishtana --check-binary-tools -c config.json` should show IDA,
+     Hex-Rays and Diaphora as found and `engine diaphora ready`.
+  2. Run on two builds of one of your binaries with `--no-llm` first. The function
+     table should list real function names.
+  3. If the export fails, the warning carries the last lines of IDA's output. The
+     IDA log is in the temp directory while the run is going (it is deleted after).
