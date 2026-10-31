@@ -28,6 +28,12 @@ git format-patch main..feature/binary-noise            -o patches/1-noise
 git format-patch feature/binary-noise..feature/binary-diaphora -o patches/2-diaphora
 git format-patch feature/binary-diaphora..feature/binary-bindiff -o patches/3-bindiff
 git format-patch feature/binary-bindiff..feature/binary-ghidriff -o patches/4-ghidriff
+git format-patch feature/binary-ghidriff..feature/binary-noise-plus -o patches/5-noise-plus
+git format-patch feature/binary-noise-plus..feature/binary-merge -o patches/6-merge
+# Stage 7 as ONE diff, not format-patch: its first commit was made on the
+# pre-review stage 6 and conflicts as a patch; the fixed stage 6 was merged in
+# (to avoid force-pushing). Its net change applies cleanly, checked 2026-11-01:
+git diff feature/binary-merge feature/binary-report > patches/7-report.diff
 ```
 
 (or one `git bundle create binary.bundle main..feature/binary-ghidriff` to carry the
@@ -41,8 +47,15 @@ git am -3 patches/1-noise/*.patch
 python -m unittest discover -s tests        # must pass before the next stage
 git switch -c feature/binary-diaphora
 git am -3 patches/2-diaphora/*.patch
-# ...and so on
+# ...and so on through stage 6, then stage 7 from its single diff:
+git switch -c feature/binary-report
+git apply -3 patches/7-report.diff
+python -m unittest discover -s tests
+git add -A && git commit -m "Stage 7: binary report for reviewers"
 ```
+
+This exact sequence (stages 5–7 on top of stage 4) was dry-run on 2026-11-01 in a
+scratch worktree: everything applied, and the tests passed.
 
 When `git am -3` stops on a conflict, use the per-stage notes below: each change is
 described by **intent** ("prepare_copy rewrites binaries when the rule asks for
