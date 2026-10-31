@@ -1113,5 +1113,67 @@ class IgnoreStringsInRules(unittest.TestCase):
         self.assertEqual(binary_ignore_strings(rules, "x.txt"), [])
 
 
+class IgnoreStringsSafety(unittest.TestCase):
+    """Regressions from review: a PE/ELF whose headers do not parse must still
+    have its code protected, never be treated as an unknown format."""
+
+    EVERYTHING = [r"[ -~]+"]
+
+    def test_pe_with_a_broken_debug_directory_keeps_its_code(self):
+        data, offsets = make_pe(text=b"instructions-that-look-like-text\x00",
+                                section_flags=0x60000020)
+        buf = bytearray(data)
+        opt = PE_OFF + 4 + 20
+        struct.pack_into("<I", buf, opt + 112 + 6 * 8 + 4, 0x7FFFFFF0)   # debug dir size
+        cleaned, fmt = normalize(bytes(buf), self.EVERYTHING)
+        self.assertIsNone(fmt)                                  # the stamps did not parse...
+        at = offsets["text"]
+        self.assertEqual(cleaned[at:at + 12], b"instructions")  # ...and code is untouched
+
+    def test_elf_with_garbage_section_headers_touches_nothing_it_cannot_place(self):
+        data, offsets = make_elf(code=b"instructions-that-look-like-text\x00")
+        buf = bytearray(data)
+        struct.pack_into("<Q", buf, 0x28, 0x7FFFFFFFFFFF)                  # e_shoff
+        cleaned, fmt = normalize(bytes(buf), self.EVERYTHING)
+        self.assertIsNone(fmt)
+        self.assertEqual(cleaned, bytes(buf))
+
+    def test_mz_without_a_pe_signature_touches_nothing(self):
+        data = b"MZ" + b"\x00" * 0x3A + struct.pack("<I", 0x40) + b"NOT-PE\x00 built 2026" * 4
+        self.assertEqual(normalize(data, self.EVERYTHING)[0], data)
+
+    def test_anchors_apply_to_each_string(self):
+        data, offsets = make_pe(text=b"v1.2.3-dirty\x00")
+        cleaned, _ = normalize(data, [r"^v1\.2\.3-\w+$"])
+        at = offsets["text"]
+        self.assertEqual(cleaned[at:at + 12], b"\x00" * 12)
+
+
+class IgnoreStringsConfig(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _main_with(self, rule):
+        config = os.path.join(self.work, "config.json")
+        with open(config, "w") as handle:
+            json.dump({"rules": [rule]}, handle)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = main([self.work, self.work, "-c", config, "--no-llm"])
+        return code, err.getvalue()
+
+    def test_an_invalid_pattern_is_a_startup_error(self):
+        code, err = self._main_with({"match": ["*.exe"], "normalize": [BINARY_STEP],
+                                     "ignore_strings": ["(unclosed"]})
+        self.assertEqual(code, 2)
+        self.assertIn("ignore_strings", err)
+
+    def test_a_non_string_pattern_is_a_startup_error(self):
+        code, err = self._main_with({"match": ["*.exe"], "normalize": [BINARY_STEP],
+                                     "ignore_strings": [42]})
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

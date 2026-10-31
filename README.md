@@ -350,12 +350,17 @@ you declare it, the way `ignore_lines` works for source:
 ```
 
 Each match inside a printable run of 4+ characters is zeroed on both sides of the
-normalized copy. **In PE and ELF files, executable sections are never touched**:
-there a printable run is instruction bytes, and zeroing it could hide a code
-change. Even a pattern that matches everything leaves code byte-identical. In a
-format MaNishtana cannot parse, the patterns apply to the whole file, because you
-declared them for those files. Keep patterns specific: anything they match in data
-stops counting as a change.
+normalized copy; `^` and `$` anchor to the start and end of that string. **In PE
+and ELF files, code is never touched**: there a printable run is instruction bytes,
+and zeroing it could hide a code change. What counts as code errs wide: executable
+PE sections (widened to file alignment) and the headers; for ELF, executable
+sections *and* executable load segments. A file that starts like a PE or ELF but
+whose headers cannot be read is not touched at all. Even a pattern that matches
+everything leaves code byte-identical. Files that are neither PE nor ELF (archives,
+COFF objects, Mach-O, firmware) get the patterns over the whole file, because you
+declared them for those files — and since archives and objects contain code, keep
+patterns for them especially specific. Anything a pattern matches in data stops
+counting as a change. An invalid pattern stops the run at startup.
 
 A binary that still differs is described instead of being passed over: format,
 size before and after, SHA-256 of both, the differing byte regions (found on the

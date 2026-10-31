@@ -16,6 +16,7 @@ nothing downstream knows which shape it was given.
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -47,6 +48,11 @@ def main(argv=None):
         settings = load_settings(config, os.path.dirname(os.path.abspath(args.config)))
     except ValueError as exc:
         sys.stderr.write("Error: %s\n" % exc)
+        return 2
+
+    problem = _check_ignore_strings(config.get("rules") or [])
+    if problem:
+        sys.stderr.write("Error: %s\n" % problem)
         return 2
 
     if args.check_binary_tools:
@@ -202,6 +208,22 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         % (args.output, len(comparison.real), len(comparison.noise), len(comparison.skipped))
     )
     return 0
+
+
+def _check_ignore_strings(rules):
+    """A bad ignore_strings pattern is a startup error, like a bad prompt placeholder.
+
+    Found later, it would surface as a crash halfway through copying the trees.
+    """
+    for rule in rules:
+        for pattern in rule.get("ignore_strings") or []:
+            if not isinstance(pattern, str):
+                return "ignore_strings entries must be strings, got %r" % (pattern,)
+            try:
+                re.compile(pattern.encode("utf-8"))
+            except re.error as exc:
+                return "invalid ignore_strings pattern %r: %s" % (pattern, exc)
+    return None
 
 
 def _selected_engines(args, settings):

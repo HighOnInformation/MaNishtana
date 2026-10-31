@@ -75,16 +75,20 @@ def normalize(data, ignore_strings=None):
     `ignore_strings` is a list of regexes (str); see the module docstring.
     """
     buf = bytearray(data)
+    kind = "pe" if buf[:2] == b"MZ" else "elf" if buf[:4] == b"\x7fELF" else None
     fmt = None
     try:
-        if buf[:2] == b"MZ" and _pe(buf):
+        if kind == "pe" and _pe(buf):
             fmt = "pe"
-        elif buf[:4] == b"\x7fELF" and _elf(buf):
+        elif kind == "elf" and _elf(buf):
             fmt = "elf"
     except (struct.error, IndexError, ValueError):
         buf, fmt = bytearray(data), None
     if ignore_strings:
-        _ignore_strings(buf, fmt, ignore_strings)
+        # By magic, not by whether the noise fields parsed: a PE or ELF with a
+        # header we cannot follow still runs, and its code must stay protected.
+        # Treating it as an unknown format would expose its code to the patterns.
+        _ignore_strings(buf, kind, ignore_strings)
     return bytes(buf), fmt
 
 
@@ -188,30 +192,46 @@ def _ignore_strings(buf, fmt, patterns):
         if any(start < hi and lo < stop for lo, hi in code):
             continue
         for regex in regexes:
-            for match in regex.finditer(buf, start, stop):
-                _zero(buf, match.start(), match.end() - match.start())
+            # Match the run on its own, so ^ and $ mean the string's start and end
+            # (with finditer's pos argument, ^ would only ever match at byte 0).
+            text = bytes(buf[start:stop])
+            for match in regex.finditer(text):
+                _zero(buf, start + match.start(), match.end() - match.start())
 
 
 def _code_ranges(buf, fmt):
-    """File ranges holding executable code, [] for a format that has none known.
+    """File ranges that may hold executable code. Raises when it cannot tell.
 
-    ELF prefers section headers (precise); without them it falls back to
-    executable PT_LOAD segments, which also cover read-only data in older
-    layouts — conservative, it only means fewer strings are eligible.
+    The caller treats an exception as "everything is code" and touches nothing,
+    so every doubt here resolves towards protecting more bytes, never fewer:
+
+      PE   every section marked executable or code, widened to the 0x200 file
+           alignment the loader rounds to, plus the headers themselves.
+      ELF  the union of executable PT_LOAD segments (what the loader really maps
+           executable) and SHF_EXECINSTR sections (what a relocatable .o has).
+           Section headers the loader ignores can be garbage; if they cannot be
+           read, the segments alone decide. Older layouts map read-only data in
+           the executable segment too, which only means fewer strings qualify.
     """
     if fmt == "pe":
         pe = _u32(buf, 0x3C)
+        if bytes(buf[pe:pe + 4]) != b"PE\x00\x00":
+            raise ValueError("no PE signature")
         count = _u16(buf, pe + 6)
         table = pe + 24 + _u16(buf, pe + 20)
-        ranges = []
+        ranges = [(0, table + count * 40)]
         for index in range(count):
             at = table + index * 40
             raw_size, raw_off = struct.unpack_from("<II", buf, at + 16)
             flags = _u32(buf, at + 36)
             if flags & (_SCN_MEM_EXECUTE | _SCN_CNT_CODE):
-                ranges.append((raw_off, raw_off + raw_size))
+                low = raw_off & ~0x1FF
+                high = (raw_off + raw_size + 0x1FF) & ~0x1FF
+                ranges.append((low, high))
         return ranges
     if fmt == "elf":
+        if buf[4] not in (1, 2) or buf[5] not in (1, 2):
+            raise ValueError("unknown ELF class or byte order")
         end = "<" if buf[5] == 1 else ">"
         wide = buf[4] == 2
         if wide:
@@ -220,34 +240,47 @@ def _code_ranges(buf, fmt):
         else:
             phoff, shoff = struct.unpack_from(end + "II", buf, 0x1C)
             phentsize, phnum, shentsize, shnum = struct.unpack_from(end + "HHHH", buf, 0x2A)
-        ranges = []
-        if shoff and shnum:
-            for index in range(shnum):
-                at = shoff + index * shentsize
-                if wide:
-                    kind, = struct.unpack_from(end + "I", buf, at + 4)
-                    flags, = struct.unpack_from(end + "Q", buf, at + 8)
-                    offset, size = struct.unpack_from(end + "QQ", buf, at + 24)
-                else:
-                    kind, flags = struct.unpack_from(end + "II", buf, at + 4)
-                    offset, size = struct.unpack_from(end + "II", buf, at + 16)
-                if flags & _SHF_EXECINSTR and kind != _SHT_NOBITS:
-                    ranges.append((offset, offset + size))
-            return ranges
-        for index in range(phnum):
-            at = phoff + index * phentsize
-            if wide:
-                kind, flags = struct.unpack_from(end + "II", buf, at)
-                offset, = struct.unpack_from(end + "Q", buf, at + 8)
-                size, = struct.unpack_from(end + "Q", buf, at + 32)
-            else:
-                kind, offset = struct.unpack_from(end + "II", buf, at)
-                size, = struct.unpack_from(end + "I", buf, at + 16)
-                flags, = struct.unpack_from(end + "I", buf, at + 24)
-            if kind == _PT_LOAD and flags & _PF_X:
-                ranges.append((offset, offset + size))
+        ranges = _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum)
+        try:
+            ranges += _elf_exec_sections(buf, end, wide, shoff, shentsize, shnum)
+        except (struct.error, IndexError, ValueError):
+            if not ranges:
+                raise             # neither table readable: cannot tell
         return ranges
     return []
+
+
+def _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum):
+    ranges = []
+    for index in range(phnum if phoff else 0):
+        at = phoff + index * phentsize
+        if wide:
+            kind, flags = struct.unpack_from(end + "II", buf, at)
+            offset, = struct.unpack_from(end + "Q", buf, at + 8)
+            size, = struct.unpack_from(end + "Q", buf, at + 32)
+        else:
+            kind, offset = struct.unpack_from(end + "II", buf, at)
+            size, = struct.unpack_from(end + "I", buf, at + 16)
+            flags, = struct.unpack_from(end + "I", buf, at + 24)
+        if kind == _PT_LOAD and flags & _PF_X:
+            ranges.append((offset, offset + size))
+    return ranges
+
+
+def _elf_exec_sections(buf, end, wide, shoff, shentsize, shnum):
+    ranges = []
+    for index in range(shnum if shoff else 0):
+        at = shoff + index * shentsize
+        if wide:
+            kind, = struct.unpack_from(end + "I", buf, at + 4)
+            flags, = struct.unpack_from(end + "Q", buf, at + 8)
+            offset, size = struct.unpack_from(end + "QQ", buf, at + 24)
+        else:
+            kind, flags = struct.unpack_from(end + "II", buf, at + 4)
+            offset, size = struct.unpack_from(end + "II", buf, at + 16)
+        if flags & _SHF_EXECINSTR and kind != _SHT_NOBITS:
+            ranges.append((offset, offset + size))
+    return ranges
 
 
 def _pe_sections(buf, table, count):
