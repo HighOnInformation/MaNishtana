@@ -607,7 +607,7 @@ class FunctionRendering(unittest.TestCase):
         md = build_report("v1", "v2", self.comparison, {"app.exe": "model says"}, None,
                           **self.kwargs)
         self.assertIn("**Function-level diff** (diaphora): 1 modified, 1 added.", md)
-        self.assertIn("| `parse` | modified | 0.75 | diaphora |", md)
+        self.assertIn("| `parse` |  | modified | 0.75 | diaphora |", md)
         self.assertIn("Show decompiled diff", md)
         self.assertIn("model says", md)
 
@@ -629,7 +629,31 @@ class FunctionRendering(unittest.TestCase):
         md = build_report("v1", "v2", self.comparison, {}, None,
                           binary={"app.exe": self.summary}, functions={"app.exe": empty})
         self.assertIn("no function changed", md)
-        self.assertIn("data, resources or layout", md)
+        self.assertIn("could not be placed in code or data", md)   # code_regions unknown
+
+    def _no_function_report(self, code_regions):
+        empty = FunctionDiff(["bindiff"], [], [])
+        summary = self.summary._replace(code_regions=code_regions)
+        return build_report("v1", "v2", self.comparison, {}, None,
+                            binary={"app.exe": summary}, functions={"app.exe": empty})
+
+    def test_code_bytes_differ_but_no_engine_saw_it(self):
+        # The real case behind this: a flipped byte inside a call instruction.
+        # BinDiff and ghidriff both judge by structure and both missed it.
+        md = self._no_function_report(1)
+        self.assertIn("The bytes that differ include code (1 region, listed above)", md)
+        self.assertNotIn("data, resources or layout — which is why", md)
+
+    def test_only_data_differs(self):
+        md = self._no_function_report(0)
+        self.assertIn("all outside code", md)
+
+    def test_html_no_function_note(self):
+        empty = FunctionDiff(["bindiff"], [], [])
+        html = build_html("v1", "v2", self.comparison, {}, None,
+                          binary={"app.exe": self.summary._replace(code_regions=2)},
+                          functions={"app.exe": empty})
+        self.assertIn("include code (2 regions", html)
 
     def test_long_lists_are_capped(self):
         many = FunctionDiff(["diaphora"], [
@@ -884,7 +908,7 @@ class TwoEngines(BinDiffSetup):
                           binary={"a.exe": BinarySummary("pe", 1, 1, "a", "b", [], 0, [], [],
                                                          0, 0)},
                           functions={"a.exe": found})
-        self.assertIn("modified ⚠ engines disagree", md)
+        self.assertIn("**Engines disagree — look here first** (1)", md)
         self.assertIn("bindiff: unchanged, diaphora: modified", md)
 
 
@@ -1249,6 +1273,82 @@ class MergeByAddress(unittest.TestCase):
                              functions={"a.exe": found})
         change = payload["real"][0]["binary_functions"]["changes"][0]
         self.assertEqual((change["address_a"], change["address_b"]), (0x10, 0x20))
+
+
+# --- report for reviewers (stage 7) -------------------------------------------------
+
+
+class ReviewerReport(unittest.TestCase):
+    def setUp(self):
+        self.comparison = binary_comparison({"a.exe": ("M", ["a.exe"])})
+        self.summary = BinarySummary("pe", 1, 1, "a", "b", [(0, 1)], 1, [], [], 0, 0)
+
+    def _found(self):
+        return FunctionDiff(["bindiff", "ghidriff"], [
+            FunctionChange("agreed", "agreed", "modified", 0.5,
+                           {"bindiff": "modified", "ghidriff": "modified"}, None,
+                           0x140001000, 0x140001000),
+            FunctionChange("moved", "moved", "modified", 0.9,
+                           {"bindiff": "modified", "ghidriff": "unchanged"}, None,
+                           0x140002000, 0x140002400),
+        ], [])
+
+    def test_disagreements_get_their_own_table_first(self):
+        md = build_report("v1", "v2", self.comparison, {}, None,
+                          binary={"a.exe": self.summary}, functions={"a.exe": self._found()})
+        first = md.index("look here first")
+        agreed = md.index("**Engines agree** (1)")
+        self.assertLess(first, agreed)
+        self.assertLess(md.index("`moved`"), agreed)
+        self.assertGreater(md.index("`agreed`"), agreed)
+
+    def test_addresses_are_shown_and_moves_spelled_out(self):
+        md = build_report("v1", "v2", self.comparison, {}, None,
+                          binary={"a.exe": self.summary}, functions={"a.exe": self._found()})
+        self.assertIn("| 0x140001000 |", md)
+        self.assertIn("| 0x140002000 → 0x140002400 |", md)
+
+    def test_no_disagreement_means_one_plain_table(self):
+        found = FunctionDiff(["bindiff"], [self._found().changes[0]._replace(
+            views={"bindiff": "modified"})], [])
+        md = build_report("v1", "v2", self.comparison, {}, None,
+                          binary={"a.exe": self.summary}, functions={"a.exe": found})
+        self.assertNotIn("look here first", md)
+        self.assertNotIn("Engines agree", md)
+        self.assertIn("| `agreed` | 0x140001000 |", md)
+
+    def test_html_marks_the_disputed_table(self):
+        html = build_html("v1", "v2", self.comparison, {}, None,
+                          binary={"a.exe": self.summary}, functions={"a.exe": self._found()})
+        self.assertIn('<table class="functions disputed">', html)
+        self.assertIn("<code>0x140002000 → 0x140002400</code>", html)
+
+
+class CodeRegions(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _pair(self, **changes):
+        a = os.path.join(self.work, "a.exe")
+        b = os.path.join(self.work, "b.exe")
+        with open(a, "wb") as handle:
+            handle.write(make_pe(section_flags=0x60000020)[0])
+        with open(b, "wb") as handle:
+            handle.write(make_pe(section_flags=0x60000020, **changes)[0])
+        return summarize(a, b)
+
+    def test_a_change_in_a_code_section_is_counted(self):
+        self.assertEqual(self._pair(code=b"\xcc" * 16).code_regions, 1)
+
+    def test_unknown_format_is_not_guessed(self):
+        a = os.path.join(self.work, "a.bin")
+        b = os.path.join(self.work, "b.bin")
+        with open(a, "wb") as handle:
+            handle.write(b"\x00firmware-1")
+        with open(b, "wb") as handle:
+            handle.write(b"\x00firmware-2")
+        self.assertIsNone(summarize(a, b).code_regions)
 
 
 if __name__ == "__main__":

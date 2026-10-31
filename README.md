@@ -392,6 +392,19 @@ Y while another says something was added at Y, that is shown as one function
 read two ways (the second engine's view is `removed+added` when it also reported
 X as removed), not as two unrelated rows.
 
+In the report, functions the engines disagree on come first, in their own table
+(**look here first**), followed by the ones they agree on. Every row has the
+function's address (old → new when it moved), which is how you find it in IDA or
+Ghidra when its name is only `sub_…`.
+
+When engines ran but found **no changed function**, the report says where the
+differing bytes are. If they include code, it says so and points at the regions.
+That is a real case, not a theory: a flipped byte inside a `call` instruction
+changes where the call goes, and neither BinDiff nor ghidriff notices, because both
+judge a function by its structure. If the differing bytes are all outside code,
+the report says that instead. The summary's `code_regions` (JSON `binary_detail`)
+is the count behind this; it is `null` when the file's code cannot be located.
+
 ```json
 "binary": {
   "engines": ["diaphora", "bindiff", "ghidriff"],

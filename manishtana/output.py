@@ -172,7 +172,8 @@ box-shadow:inset 0 1px 0 var(--accent),inset 0 -1px 0 var(--accent)}
 table.sbs tbody tr:not(.s-gap):hover td.n{color:var(--ink)}
 .empty{margin:0;color:var(--muted)}
 .facts{margin:0;padding-left:1.2em}.facts li{margin:.15em 0}.facts code{word-break:break-all}
-.fn-head{margin:.6em 0 .3em}pre.code{margin:0;padding:.6em;white-space:pre;font-size:.85em}
+.fn-head{margin:.6em 0 .3em}
+table.disputed{border-left:3px solid var(--accent)}pre.code{margin:0;padding:.6em;white-space:pre;font-size:.85em}
 @media print{
 body{background:#fff;color:#000}
 .wrap{max-width:none;padding:0}
@@ -343,7 +344,7 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
                 out.append("")
             found = (functions or {}).get(rel)
             if found is not None:
-                out.extend(_md_functions(found, max_functions))
+                out.extend(_md_functions(found, max_functions, detail))
             if rel in analyses:
                 out.append(analyses[rel])
                 out.append("")
@@ -515,7 +516,7 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
             parts.append('<ul class="facts">%s</ul>' % "".join(
                 "<li>%s</li>" % _html_inline(item) for item in _binary_facts(binary)))
             if functions is not None:
-                parts.append(_html_functions(functions, max_functions))
+                parts.append(_html_functions(functions, max_functions, binary))
             if rel in analyses:
                 parts.append('<div class="prose">%s</div>' % _html_prose(analyses[rel]))
             if decompiled:
@@ -606,21 +607,41 @@ def _html_inline(runs):
 
 
 def _function_rows(found, limit):
-    """(rows, hidden count). Each row: name, status, similarity text, engines text, disputed."""
-    rows = []
-    for change in found.changes[:limit]:
+    """(disputed rows, agreed rows, hidden count), disagreements first.
+
+    Each row: (name, address, status, similarity, engines). A function the engines
+    disagree on is where a reviewer should look first, so those come out of the
+    main table into their own, ahead of it; the cap counts both together.
+    """
+    disputed, agreed = [], []
+    for change in found.changes:
+        (disputed if len(set(change.views.values())) > 1 else agreed).append(change)
+    shown = (disputed + agreed)[:limit]
+    rows = ([], [])
+    for change in shown:
         if change.name_a and change.name_b and change.name_a != change.name_b:
             name = "%s → %s" % (change.name_a, change.name_b)
         else:
             name = change.name_a or change.name_b or "?"
         similarity = "—" if change.similarity is None else "%.2f" % change.similarity
-        disputed = len(set(change.views.values())) > 1
-        if disputed:
+        is_disputed = change in disputed
+        if is_disputed:
             engines = ", ".join("%s: %s" % item for item in sorted(change.views.items()))
         else:
             engines = ", ".join(sorted(change.views))
-        rows.append((name, change.status, similarity, engines, disputed))
-    return rows, max(0, len(found.changes) - limit)
+        rows[0 if is_disputed else 1].append(
+            (name, _address(change), change.status, similarity, engines))
+    return rows[0], rows[1], max(0, len(found.changes) - limit)
+
+
+def _address(change):
+    """0x… for the function's entry: old side, new side, or old → new if it moved."""
+    old = getattr(change, "address_a", None)
+    new = getattr(change, "address_b", None)
+    if old is not None and new is not None and old != new:
+        return "0x%X → 0x%X" % (old, new)
+    value = old if old is not None else new
+    return "" if value is None else "0x%X" % value
 
 
 def _function_counts(found):
@@ -629,44 +650,83 @@ def _function_counts(found):
                      if counts[key]) or "no function changed"
 
 
-def _md_functions(found, limit):
+def _no_function_note(summary):
+    """Why there is no function table, without claiming more than layer 1 knows.
+
+    Engines decide "changed" from a function's structure. A changed constant,
+    offset or call target can leave the structure as it was, so when the bytes
+    that differ lie in code the honest message is "look at these bytes", not
+    "this was data".
+    """
+    in_code = getattr(summary, "code_regions", None) if summary is not None else None
+    if in_code:
+        return ("The bytes that differ include code (%d region%s, listed above), yet no "
+                "engine found a changed function. Engines judge a function by its "
+                "structure; a changed constant, offset or call target can leave that "
+                "intact. Inspect those bytes in a disassembler."
+                % (in_code, "" if in_code == 1 else "s"))
+    if in_code == 0:
+        return ("The bytes that differ are all outside code — data, resources or "
+                "layout — which is why no function changed.")
+    return ("No function the engines matched changed. Where the differing bytes lie "
+            "could not be placed in code or data for this file.")
+
+
+def _md_functions(found, limit, summary=None):
     out = ["**Function-level diff** (%s): %s." % (", ".join(found.engines),
                                                    _function_counts(found)), ""]
     if not found.changes:
-        out.append("The difference is outside the functions the engines matched — data, "
-                   "resources or layout.\n")
+        out.append(_no_function_note(summary) + "\n")
         return out
-    rows, hidden = _function_rows(found, limit)
-    out.append("| Function | Status | Similarity | Engines |")
-    out.append("|---|---|---|---|")
-    for name, status, similarity, engines, disputed in rows:
-        out.append("| `%s` | %s%s | %s | %s |" % (name.replace("|", "\\|"), status,
-                                               " ⚠ engines disagree" if disputed else "",
-                                               similarity, engines))
+    disputed, agreed, hidden = _function_rows(found, limit)
+    for title, rows in (("**Engines disagree — look here first** (%d)" % len(disputed),
+                         disputed),
+                        ("**Engines agree** (%d)" % len(agreed) if disputed else None,
+                         agreed)):
+        if not rows:
+            continue
+        if title:
+            out.append(title)
+            out.append("")
+        out.append("| Function | Address | Status | Similarity | Engines |")
+        out.append("|---|---|---|---|---|")
+        for name, address, status, similarity, engines in rows:
+            out.append("| `%s` | %s | %s | %s | %s |" % (name.replace("|", "\\|"), address,
+                                                      status, similarity, engines))
+        out.append("")
     if hidden:
-        out.append("| … | %d more not listed | | |" % hidden)
-    out.append("")
+        out.append("%d more not listed (`binary.max_functions`); the JSON output has them "
+                   "all.\n" % hidden)
     return out
 
 
-def _html_functions(found, limit):
+def _html_functions(found, limit, summary=None):
     parts = ['<p class="fn-head"><strong>Function-level diff</strong> (%s): %s.</p>'
              % (escape(", ".join(found.engines)), escape(_function_counts(found)))]
     if not found.changes:
-        parts.append('<p class="empty">The difference is outside the functions the engines '
-                     'matched — data, resources or layout.</p>')
+        parts.append('<p class="empty">%s</p>' % escape(_no_function_note(summary)))
         return "\n".join(parts)
-    rows, hidden = _function_rows(found, limit)
-    parts.append("<table class=\"functions\"><thead><tr><th>Function</th><th>Status</th>"
-                 "<th>Similarity</th><th>Engines</th></tr></thead><tbody>")
-    for name, status, similarity, engines, disputed in rows:
-        flag = ' <span class="chip">engines disagree</span>' if disputed else ""
-        parts.append('<tr data-status="%s"><td><code>%s</code></td><td>%s%s</td><td>%s</td>'
-                     "<td>%s</td></tr>" % (escape(status), escape(name), escape(status), flag,
-                                           escape(similarity), escape(engines)))
+    disputed, agreed, hidden = _function_rows(found, limit)
+    for title, rows, css in (("Engines disagree — look here first (%d)" % len(disputed),
+                              disputed, "functions disputed"),
+                             ("Engines agree (%d)" % len(agreed) if disputed else None,
+                              agreed, "functions")):
+        if not rows:
+            continue
+        if title:
+            parts.append('<p class="fn-head">%s</p>' % escape(title))
+        parts.append('<table class="%s"><thead><tr><th>Function</th><th>Address</th>'
+                     "<th>Status</th><th>Similarity</th><th>Engines</th></tr></thead><tbody>"
+                     % css)
+        for name, address, status, similarity, engines in rows:
+            parts.append('<tr data-status="%s"><td><code>%s</code></td><td><code>%s</code>'
+                         "</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                         % (escape(status), escape(name), escape(address), escape(status),
+                            escape(similarity), escape(engines)))
+        parts.append("</tbody></table>")
     if hidden:
-        parts.append('<tr><td colspan="4" class="empty">%d more not listed</td></tr>' % hidden)
-    parts.append("</tbody></table>")
+        parts.append('<p class="empty">%d more not listed (binary.max_functions); the JSON '
+                     "output has them all.</p>" % hidden)
     return "\n".join(parts)
 
 

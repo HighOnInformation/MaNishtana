@@ -6,7 +6,7 @@ Public interface:
     BinarySummary   namedtuple(format, size_a, size_b, sha_a, sha_b,
                                regions, regions_total, strings_added,
                                strings_removed, strings_added_total,
-                               strings_removed_total)
+                               strings_removed_total, code_regions=None)
 
 `normalize` is what makes the core trick work for binaries. `prepare_copy` writes
 its output into the normalized copy, so two builds of the same code that differ
@@ -37,7 +37,8 @@ import struct
 BinarySummary = collections.namedtuple(
     "BinarySummary",
     "format size_a size_b sha_a sha_b regions regions_total strings_added "
-    "strings_removed strings_added_total strings_removed_total",
+    "strings_removed strings_added_total strings_removed_total code_regions",
+    defaults=(None,),
 )
 
 _BLOCK = 4096
@@ -103,10 +104,12 @@ def summarize(path_a, path_b, ignore_strings=None):
     data_b = _read(path_b)
     fmt = _format_of(data_b if data_b is not None else data_a)
 
-    regions, total = [], 0
+    regions, total, code_regions = [], 0, None
     if data_a is not None and data_b is not None:
-        regions, total = _regions(normalize(data_a, ignore_strings)[0],
-                                  normalize(data_b, ignore_strings)[0])
+        regions, blocks = _regions(normalize(data_a, ignore_strings)[0],
+                                   normalize(data_b, ignore_strings)[0])
+        total = len(blocks)
+        code_regions = _count_in_code(blocks, data_a, data_b)
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
@@ -125,6 +128,7 @@ def summarize(path_a, path_b, ignore_strings=None):
         strings_removed=removed[:_MAX_STRINGS],
         strings_added_total=len(added),
         strings_removed_total=len(removed),
+        code_regions=code_regions,
     )
 
 
@@ -449,7 +453,27 @@ def _regions(data_a, data_b):
         while last > first and data_a[last - 1] == data_b[last - 1]:
             last -= 1
         exact.append((first, last))
-    return exact, len(blocks)
+    return exact, blocks
+
+
+def _count_in_code(blocks, data_a, data_b):
+    """How many differing regions overlap code on either side; None if unknown.
+
+    The report uses it to tell "the bytes that differ are code, yet no engine
+    found a changed function" from "the difference is in data". Unknown (None)
+    for formats without code ranges or headers that cannot be read.
+    """
+    code = []
+    for data in (data_a, data_b):
+        kind = "pe" if data[:2] == b"MZ" else "elf" if data[:4] == b"\x7fELF" else None
+        if kind is None:
+            return None
+        try:
+            code.extend(_code_ranges(bytearray(data), kind))
+        except (struct.error, IndexError, ValueError):
+            return None
+    return sum(1 for start, stop in blocks
+               if any(start < hi and lo < stop for lo, hi in code))
 
 
 def _strings(data):
