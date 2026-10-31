@@ -317,6 +317,34 @@ regex in `.c` and a different one in `.json` in a single invocation. Substitutin
 token on both sides achieves per-type ignoring inside one `git diff`, and preserves
 line counts so numbering does not shift.
 
+### Binaries — rebuilt or really changed?
+
+A file with a NUL byte in its first 8 KB is a binary, as git decides it. Binaries
+are not reformatted, but one built-in normalize step applies to them:
+
+```json
+{ "match": ["*.exe", "*.dll", "*.so", "*.o"], "normalize": ["binary-stamps"] }
+```
+
+`binary-stamps` zeroes the fields every link changes even when the code did not, in
+the normalized copy only, so a rebuild of unchanged code drops out of the second
+diff as **noise only** — the same definition as for source files:
+
+| Format | Fields zeroed |
+|---|---|
+| PE (`.exe`, `.dll`) | COFF link time, optional-header checksum, export and debug directory time stamps, CodeView PDB GUID and age, the reproducible-build hash |
+| ELF (`.so`, `.o`, executables) | GNU build-id, `.gnu_debuglink` CRC |
+
+Any other format is compared as it is. The step runs in-process and needs nothing on
+`PATH`; listed for a text file, it does nothing. The default config still *skips*
+`*.o *.a *.so *.exe` — replace that skip rule with the one above to compare them.
+
+A binary that still differs is described instead of being passed over: format,
+size before and after, SHA-256 of both, the differing byte regions (found on the
+normalized bytes, so a time stamp is not one of them; differences within 4 KB of
+each other are one region) and the printable strings of 8+ characters added and
+removed — often the quickest clue to what changed.
+
 ### `prompts` — what the model is told
 
 ```json
@@ -381,7 +409,7 @@ them declarable too.
 |---|---|---|
 | `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
 | `-H` HTML | A human reviewer, offline | Self-contained, side-by-side, no JavaScript |
-| `-j` JSON | Agents, CI, review bots | `schema_version: 1` |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 3` |
 
 The report opens with the whole-change brief, the executive summary, and any
 cross-reference findings — then the file table, then each change.
@@ -396,7 +424,10 @@ See [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md) for the full visual language.
 The JSON carries `brief`, `summary`, `counts`, `cross_reference` (`removed` and
 `dangling`), `inputs.prompts_sha256` — a fingerprint of the exact prompt set used,
 so a report is traceable to what produced it — and per-file `risk`, `analysis` and
-`diff`.
+`diff`. A real binary also has `binary_detail`: `format`, `size_a`, `size_b`,
+`sha_a`, `sha_b`, `regions` (pairs of byte offsets), `regions_total`, and
+`strings_added`/`strings_removed` (at most 20 each) with their `_total` counts. It
+is `null` for text files. (Schema 3 added it; 2 added `commits`.)
 
 **`risk` and `analysis` are genuinely nullable.** Binaries are never analysed, a
 dead endpoint yields nothing, and files past `max_files` get no prose. Combined
@@ -431,6 +462,10 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
 - **Files that are not valid UTF-8 are compared un-normalized** and warned about, so
   their formatting changes count as real. Decoding them lossily could make two
   genuinely different files look identical, which is the worse failure.
+- **`binary-stamps` knows PE and ELF only.** Mach-O, static archives (`.a`),
+  firmware images and installers are compared byte for byte, so a rebuild of those
+  counts as a real change. Build paths embedded in strings (`__FILE__`, debug info)
+  are not normalized either: a binary built in a different directory differs.
 - **The cross-reference reads text, not C.** A name in a comment counts as a
   reference.
 - **In `--git` mode the report's "Directory A/B" rows name temporary paths** that

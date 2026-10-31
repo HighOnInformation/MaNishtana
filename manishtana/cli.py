@@ -19,8 +19,9 @@ import os
 import sys
 import tempfile
 
+from .binnoise import summarize as summarize_binary
 from .common import warn
-from .compare import compare
+from .compare import binary_pairs, compare
 from .llm import Analysis, analyze_changes, http_chat
 from .output import build_html, build_json, build_report
 from .settings import load as load_settings
@@ -115,6 +116,10 @@ def _run(args, config, settings, dir_a, dir_b, commits):
     llm = config.get("llm") or {}
     comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
     xref = cross_reference(comparison.sections, dir_b)
+    binary = {
+        rel: summarize_binary(old, new)
+        for rel, (old, new) in binary_pairs(comparison, dir_a, dir_b).items()
+    }
 
     # The author's own account of the change is withheld unless asked for: a model
     # shown it restates it, and the report is worth more when it can be checked
@@ -144,6 +149,7 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         "risk": settings.risk,
         "commits": commits,
         "intent_shown": bool(intent),
+        "binary": binary,
     }
     report = build_report(dir_a, dir_b, comparison, analyses, summary, **shared)
     if not _write(args.output, report, "report"):

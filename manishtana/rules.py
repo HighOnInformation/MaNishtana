@@ -2,6 +2,7 @@
 
 Public interface:
     IGNORED_TOKEN                       the marker left behind by ignore_lines
+    BINARY_STEP                         the built-in normalize step for binaries
     is_binary(path) -> bool
     skipped_files(rules, paths) -> set  paths matched by a skip rule
     prepare_copy(src, dst, rules)       copy a tree and apply the rules to the copy
@@ -22,9 +23,14 @@ import shutil
 import subprocess
 import sys
 
+from .binnoise import normalize as _normalize_binary
 from .common import warn
 
 IGNORED_TOKEN = "<<ignored-by-rule>>"
+
+# Not a command line: it runs in-process (binnoise), so it is not one of the
+# configurable normalizer aliases and cannot be overridden by one.
+BINARY_STEP = "binary-stamps"
 
 _JSON_SORT_CODE = (
     "import json,sys;"
@@ -63,9 +69,12 @@ def skipped_files(rules, paths):
 def prepare_copy(src, dst, rules, settings=None):
     """Copy a directory to dst and apply the rules to the copy.
 
-    Skipped files are deleted, binaries are left untouched, and everything else is
-    normalized then line-filtered. Failures degrade: a missing normalizer or a
-    failing command warns and leaves the text as it was.
+    Skipped files are deleted, and everything else is normalized then
+    line-filtered. Binaries are left untouched unless their rule lists
+    BINARY_STEP, in which case their build-noise fields are zeroed so that a
+    rebuild of unchanged code drops out of the second diff as noise. Failures
+    degrade: a missing normalizer or a failing command warns and leaves the text
+    as it was.
 
     `settings` supplies the normalizer command lines and the tuning values; the
     built-in defaults are used when it is absent.
@@ -82,9 +91,12 @@ def prepare_copy(src, dst, rules, settings=None):
             if rule.get("skip"):
                 os.remove(path)
                 continue
-            if is_binary(path):
-                continue
             steps = rule.get("normalize") or []
+            if is_binary(path):
+                if BINARY_STEP in steps:
+                    _rewrite_binary(path, rel)
+                continue
+            steps = [step for step in steps if step != BINARY_STEP]
             patterns = rule.get("ignore_lines") or []
             if not steps and not patterns:
                 continue
@@ -114,6 +126,20 @@ def prepare_copy(src, dst, rules, settings=None):
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _rewrite_binary(path, rel):
+    """Zero a binary copy's build-noise fields. Unknown formats stay as they are."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        cleaned, fmt = _normalize_binary(data)
+        if fmt is None or cleaned == data:
+            return
+        with open(path, "wb") as handle:
+            handle.write(cleaned)
+    except OSError as exc:
+        warn("cannot rewrite binary %s: %s — comparing it un-normalized." % (rel, exc))
 
 
 def _from_settings(settings):

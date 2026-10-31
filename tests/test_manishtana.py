@@ -1085,7 +1085,7 @@ class CommitsInOutput(unittest.TestCase):
         payload = build_json(
             "v1", "v2", comparison(), {}, None, commits=self.commits, intent_shown=True
         )
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["commits"][0]["sha"], "abcdef1234")
         self.assertTrue(payload["inputs"]["intent_shown"])
 

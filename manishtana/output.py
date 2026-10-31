@@ -5,6 +5,9 @@ Public interface:
     build_html(dir_a, dir_b, comparison, analyses, summary) -> str     (HTML)
     build_json(dir_a, dir_b, comparison, analyses, summary) -> dict
 
+All three take an optional `binary` mapping, {path: binnoise.BinarySummary}, for
+the real binaries; without it a binary is reported as not analyzed, as before.
+
 All three are pure: same inputs, same output, no I/O. Writing files is the caller's
 job, which is what makes them straightforward to test.
 
@@ -165,6 +168,7 @@ background-image:linear-gradient(var(--hover),var(--hover));
 box-shadow:inset 0 1px 0 var(--accent),inset 0 -1px 0 var(--accent)}
 table.sbs tbody tr:not(.s-gap):hover td.n{color:var(--ink)}
 .empty{margin:0;color:var(--muted)}
+.facts{margin:0;padding-left:1.2em}.facts li{margin:.15em 0}.facts code{word-break:break-all}
 @media print{
 body{background:#fff;color:#000}
 .wrap{max-width:none;padding:0}
@@ -193,7 +197,7 @@ def _labels(risk):
 
 
 def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None,
-               risk=None, settings=None, commits=None, intent_shown=False):
+               risk=None, settings=None, commits=None, intent_shown=False, binary=None):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
     file_label, summary_label = _labels(risk)
     files = []
@@ -204,6 +208,7 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
                 "file": rel,
                 "status": comparison.real[rel][0],
                 "binary": rel in comparison.binaries,
+                "binary_detail": _binary_json((binary or {}).get(rel)),
                 "risk": _extract_risk(analysis, file_label),
                 "analysis": analysis,
                 "diff": comparison.sections.get(rel),
@@ -212,7 +217,9 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     return {
         # 2: added "commits" — the stated intent that came with a git range — and
         # "inputs.intent_shown", which says whether the model was allowed to see it.
-        "schema_version": 2,
+        # 3: added "binary_detail" on each real file — sizes, hashes, differing
+        # regions and strings for a binary, null otherwise.
+        "schema_version": 3,
         "generated_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "dir_a": dir_a,
         "dir_b": dir_b,
@@ -237,7 +244,7 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
 
 
 def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
-                 commits=None, intent_shown=False):
+                 commits=None, intent_shown=False, binary=None):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -320,7 +327,12 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
     for rel in sorted(real):
         out.append("### `%s` — %s\n" % (rel, _STATUS_LABELS.get(real[rel][0], real[rel][0])))
         if rel in comparison.binaries:
-            out.append("Binary file — not analyzed, no diff shown.\n")
+            detail = (binary or {}).get(rel)
+            if detail is None:
+                out.append("Binary file — not analyzed, no diff shown.\n")
+            else:
+                out.extend("- %s" % _md_inline(item) for item in _binary_facts(detail))
+                out.append("")
             continue
         if rel in analyses:
             out.append(analyses[rel])
@@ -336,7 +348,7 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
 
 
 def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
-               commits=None, intent_shown=False):
+               commits=None, intent_shown=False, binary=None):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -441,7 +453,8 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
     else:
         out.append('<div class="changes">')
         for rel in sorted(real):
-            out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label))
+            out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label,
+                                     (binary or {}).get(rel)))
         out.append("</div>")
     out.append("</section>")
 
@@ -463,7 +476,8 @@ def _file_row(rel, status, is_real=False):
     )
 
 
-def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Risk"):
+def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Risk",
+                  binary=None):
     status = _STATUS_LABELS.get(real[rel][0], real[rel][0])
     parts = ['<article class="change" id="file-%s">' % escape(rel)]
     heading = ["<h3><code>%s</code>" % escape(rel), '<span class="chip">%s</span>' % escape(status)]
@@ -472,7 +486,11 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
         heading.append(badge)
     parts.append("".join(heading) + "</h3>")
     if rel in comparison.binaries:
-        parts.append('<p class="empty">Binary file — not analyzed, no diff shown.</p>')
+        if binary is None:
+            parts.append('<p class="empty">Binary file — not analyzed, no diff shown.</p>')
+        else:
+            parts.append('<ul class="facts">%s</ul>' % "".join(
+                "<li>%s</li>" % _html_inline(item) for item in _binary_facts(binary)))
         return "\n".join(parts) + "\n</article>"
     if rel in analyses:
         parts.append('<div class="prose">%s</div>' % _html_prose(analyses[rel]))
@@ -487,6 +505,76 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
         # empty disclosure would drop the only fact the reviewer needs.
         parts.append('<p class="empty">%s</p>' % _metadata_only_note(rel, real))
     return "\n".join(parts) + "\n</article>"
+
+
+# A fact is a list of (text, is_code) runs, so Markdown and HTML each render the
+# code spans their own way from one source of wording.
+def _binary_facts(summary):
+    """What layer 1 found about a binary that still differs, as facts."""
+    kind = {"pe": "PE (Windows)", "elf": "ELF (Linux/Unix)"}.get(summary.format,
+                                                                 "unrecognized format")
+    facts = [
+        [("Binary file, %s." % kind, False)],
+        [("Size: %s" % _size_change(summary.size_a, summary.size_b), False)],
+        [("SHA-256: ", False), (_short(summary.sha_a), True), (" → ", False),
+         (_short(summary.sha_b), True)],
+    ]
+    if summary.regions_total:
+        shown = ", ".join("0x%X–0x%X" % (start, stop) for start, stop in summary.regions)
+        more = summary.regions_total > len(summary.regions)
+        facts.append([("Differing regions: %d (%s%s)"
+                       % (summary.regions_total, shown, ", …" if more else ""), False)])
+    for label, items, total in (
+        ("Strings added", summary.strings_added, summary.strings_added_total),
+        ("Strings removed", summary.strings_removed, summary.strings_removed_total),
+    ):
+        if not total:
+            continue
+        runs = [("%s (%d): " % (label, total), False)]
+        for index, item in enumerate(items):
+            if index:
+                runs.append((", ", False))
+            runs.append((item, True))
+        if total > len(items):
+            runs.append((", …", False))
+        facts.append(runs)
+    return facts
+
+
+def _size_change(size_a, size_b):
+    if size_a is None:
+        return "added, %s bytes" % format(size_b or 0, ",")
+    if size_b is None:
+        return "deleted, was %s bytes" % format(size_a, ",")
+    delta = size_b - size_a
+    return "%s → %s bytes (%s%s)" % (format(size_a, ","), format(size_b, ","),
+                                     "+" if delta >= 0 else "−", format(abs(delta), ","))
+
+
+def _short(sha):
+    return sha[:16] if sha else "—"
+
+
+def _md_inline(runs):
+    """Runs to Markdown. A string holding a backtick gets a double-backtick span."""
+    out = []
+    for text, is_code in runs:
+        if not is_code:
+            out.append(text)
+        elif "`" in text:
+            out.append("`` %s ``" % text)
+        else:
+            out.append("`%s`" % text)
+    return "".join(out)
+
+
+def _html_inline(runs):
+    return "".join("<code>%s</code>" % escape(text) if is_code else escape(text)
+                   for text, is_code in runs)
+
+
+def _binary_json(summary):
+    return dict(summary._asdict()) if summary is not None else None
 
 
 def _metadata_only_note(rel, real):

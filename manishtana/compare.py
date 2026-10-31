@@ -3,6 +3,7 @@
 Public interface:
     compare(dir_a, dir_b, rules) -> Comparison
     Comparison                      namedtuple(real, noise, skipped, sections, binaries)
+    binary_pairs(comparison, dir_a, dir_b) -> {path: (old file | None, new file | None)}
 
 git diff runs once on the untouched originals and once on rule-normalized copies.
 A file that differs in the first pass but not the second changed only in ways the
@@ -49,6 +50,28 @@ def compare(dir_a, dir_b, rules, settings=None):
         sections=sections,
         binaries=_find_binaries(normalized, dir_a, dir_b),
     )
+
+
+def binary_pairs(comparison, dir_a, dir_b):
+    """Where each real binary lives on disk, old side and new side.
+
+    Added files have no old side and deleted files no new side (None). A rename
+    or copy pairs its old path in dir_a with its new path in dir_b, so the two
+    sides are the same file before and after, not two unrelated paths.
+    """
+    pairs = {}
+    for rel in sorted(comparison.binaries):
+        status, paths = comparison.real[rel]
+        old_rel = paths[0] if status in ("R", "C") else rel
+        old = None if status == "A" else _existing(dir_a, old_rel)
+        new = None if status == "D" else _existing(dir_b, rel)
+        pairs[rel] = (old, new)
+    return pairs
+
+
+def _existing(root, rel):
+    path = os.path.join(root, rel.replace("/", os.sep))
+    return path if os.path.isfile(path) else None
 
 
 def _noise(raw, normalized, skipped):
