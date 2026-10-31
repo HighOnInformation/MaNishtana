@@ -22,6 +22,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.binengines import (
+    _ghidra_rebase,
+    _read_bindiff,
     _hex,
     ENGINES,
     _binexport_functions,
@@ -1249,6 +1251,109 @@ class MergeByAddress(unittest.TestCase):
                              functions={"a.exe": found})
         change = payload["real"][0]["binary_functions"]["changes"][0]
         self.assertEqual((change["address_a"], change["address_b"]), (0x10, 0x20))
+
+
+class MergeReviewRegressions(unittest.TestCase):
+    """Cases found by an independent review of the address merge."""
+
+    def test_folding_keeps_the_new_code(self):
+        merged = _merge({
+            "bindiff": [fc("bindiff", "modified", "foo", "foo", 0x1000, 0x2000, 0.6)],
+            "ghidriff": [
+                FunctionChange("foo", None, "removed", None, {"ghidriff": "removed"},
+                               "--- a/foo\n+++ /dev/null\n@@ -1 +0,0 @@\n-OLD foo code\n",
+                               0x1000, None),
+                FunctionChange(None, "foo", "added", None, {"ghidriff": "added"},
+                               "--- /dev/null\n+++ b/foo\n@@ -0,0 +1 @@\n+NEW foo code\n",
+                               None, 0x2000)],
+        })
+        self.assertEqual(len(merged), 1)
+        self.assertIn("-OLD foo code", merged[0].pseudo_diff)
+        self.assertIn("+NEW foo code", merged[0].pseudo_diff)
+
+    def test_a_folded_row_is_a_modification_whoever_came_first(self):
+        merged = _merge({
+            "diaphora": [fc("diaphora", "removed", "foo", None, 0x1000, None),
+                         fc("diaphora", "added", None, "foo", None, 0x2000)],
+            "bindiff": [fc("bindiff", "modified", "foo", "foo", 0x1000, 0x2000, 0.6)],
+        })
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].status, "modified")
+        self.assertEqual(merged[0].views, {"diaphora": "removed+added", "bindiff": "modified"})
+
+    def test_an_engine_that_matched_x_elsewhere_keeps_its_two_functions(self):
+        # ghidriff never listed X: it matched X as identical, so its "added Y" is
+        # a different function. Folding would erase that verdict and a new row.
+        merged = _merge({
+            "bindiff": [fc("bindiff", "modified", "foo", "evil", 0x1000, 0x2000, 0.3)],
+            "ghidriff": [fc("ghidriff", "added", None, "evil", None, 0x2000)],
+        })
+        self.assertEqual(len(merged), 2)
+        added = [c for c in merged if c.status == "added"][0]
+        self.assertEqual(added.views, {"bindiff": "unchanged", "ghidriff": "added"})
+
+    def test_different_real_names_at_one_address_stay_apart(self):
+        merged = _merge({
+            "diaphora": [fc("diaphora", "modified", "other", "other", 0x101139, 0x101139, 0.5)],
+            "ghidriff": [fc("ghidriff", "modified", "parse", "parse", 0x101139, 0x101139, 0.4)],
+        })
+        self.assertEqual(sorted(c.name_a for c in merged), ["other", "parse"])
+        parse = [c for c in merged if c.name_a == "parse"][0]
+        self.assertEqual(parse.views, {"diaphora": "unchanged", "ghidriff": "modified"})
+
+
+class GhidraRebase(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _elf(self, e_type, load_vaddr):
+        data = bytearray(make_elf()[0])
+        struct.pack_into("<H", data, 16, e_type)
+        phoff = struct.unpack_from("<Q", data, 0x20)[0]
+        struct.pack_into("<I", data, phoff, 1)                    # PT_NOTE -> PT_LOAD
+        struct.pack_into("<Q", data, phoff + 16, load_vaddr)
+        path = os.path.join(self.work, "f%d_%x" % (e_type, load_vaddr))
+        with open(path, "wb") as handle:
+            handle.write(data)
+        return path
+
+    def test_zero_based_shared_object_is_moved_back(self):
+        # Verified on Ghidra 12.2 with its own override.so sample: original image
+        # base 0x0, Ghidra minimum address 0x100000.
+        self.assertEqual(_ghidra_rebase(self._elf(3, 0)), 0x100000)
+
+    def test_executables_and_based_objects_are_left_alone(self):
+        self.assertEqual(_ghidra_rebase(self._elf(2, 0x400000)), 0)
+        self.assertEqual(_ghidra_rebase(self._elf(3, 0x7000000)), 0)
+
+    def test_pe_and_garbage_are_left_alone(self):
+        path = os.path.join(self.work, "a.exe")
+        with open(path, "wb") as handle:
+            handle.write(make_pe()[0])
+        self.assertEqual(_ghidra_rebase(path), 0)
+        self.assertEqual(_ghidra_rebase(os.path.join(self.work, "missing")), 0)
+
+
+class BinDiffHighAddresses(unittest.TestCase):
+    def test_addresses_above_2_63_round_trip(self):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        high = 0xFFFFFFFF81000000
+        signed = high - (1 << 64)          # how SQLite hands it back
+        db = os.path.join(work, "x.BinDiff")
+        write_db(db, [
+            ("create table function (address1 bigint, name1 text, address2 bigint, "
+             "name2 text, similarity double precision)", None),
+            ("insert into function values (?,?,?,?,?)", [(signed, "k", signed, "k", 0.5)]),
+        ])
+        old = os.path.join(work, "old.BinExport")
+        new = os.path.join(work, "new.BinExport")
+        for path in (old, new):
+            with open(path, "wb") as handle:
+                handle.write(binexport([(high, "k", 0)]))
+        changes = _read_bindiff(db, old, new)
+        self.assertEqual([(c.status, c.address_a) for c in changes], [("modified", high)])
 
 
 if __name__ == "__main__":
