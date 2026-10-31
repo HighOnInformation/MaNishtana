@@ -502,3 +502,70 @@ rewriting build-specific bytes in the real jq binaries.
 - Not done: a rename between two paths that match different rules uses the new
   path's patterns for the summary's region list. This affects only the
   description, never the classification.
+
+### Stage 6 — `feature/binary-merge` (from `feature/binary-noise-plus` @ `cb621f0`)
+
+**Goal:** fewer false "engines disagree" flags by merging findings on function
+address instead of function name.
+
+| Commit | What and why |
+|---|---|
+| `34a4c72` | Addresses from every adapter; address-keyed merge with the added-into-modified fold. |
+| (this commit) | Worklog. |
+
+**Intent of each change**
+
+1. **`binengines.py`**
+   - `FunctionChange` gains `address_a` and `address_b`. They default to `None`, so
+     existing six-argument constructions still work.
+   - The adapters fill them:
+     - Diaphora: `results.address`/`address2` and `unmatched.address`, hex text.
+     - BinDiff: `address1`/`address2`, and the `.BinExport` vertex address for
+       unmatched functions.
+     - ghidriff: each record's `address`, which is Ghidra's `Address.toString()`,
+       sometimes `ram:`-prefixed.
+     - `_hex()` reads all three forms.
+   - `_merge` works in two passes:
+     1. Key by `("a", old address)`, else `("b", new address)`, else name. A
+        default name (`sub_`/`FUN_`) stands in for the address when there is none.
+     2. An entry known only on the new side folds into one whose new address is
+        the same. An engine whose view there is `removed` becomes
+        `removed+added`. An engine that already placed something at that address
+        blocks the fold, because that means two functions.
+   - `_combine` merges one finding into an entry. The first engine's view wins for
+     an engine seen twice.
+2. **`output.py`**: the JSON function entries carry `address_a`/`address_b`.
+3. **Tests**: the fakes now give each function the same address in every engine,
+   as real tools do. New `MergeByAddress` tests cover different names at one
+   address, the fold, the guard, removed and added at one address staying apart,
+   merging by default name when an engine gives no address, address parsing, and
+   addresses in the JSON.
+4. **README**: one paragraph on how merging works.
+
+**Verification (real tools, real binaries)**
+
+- Unit tests: 238 OK.
+- Fixture: `docs/worklog/checks/make_fixture.py --pe jq-1.7.exe jq-1.7.1.exe`.
+  Engines BinDiff and ghidriff, through Ghidra 12.2. The run took 12m53s.
+- **`changed.exe` (jq 1.7 → 1.7.1):** 81 rows, down from 82 in stage 4. 21
+  disagreements, down from 22. Every row carries addresses.
+  - The one fold: BinDiff said modified X→Y, ghidriff said removed X and added Y.
+    That is now one row.
+  - **The other 21 are not merging errors.** For 12 functions ghidriff sees a
+    change where BinDiff matched identical; for 5 it is the reverse; 3 are one
+    engine's add or remove with no counterpart. These are genuine differences in
+    what each engine counts as "changed", and they are exactly what the flag is
+    for. Merging cannot remove them, and should not.
+- **`patched.exe`** (the fixture flips the byte at file offset 0x500):
+  - The byte is inside a `call rel32` (`e8 cc bc 07 00` → `e8 33 bc 07 00`), so
+    the call now jumps somewhere else.
+  - **Both engines report no changed function.** A different call target inside
+    existing code does not change a function's structure, and both engines judge
+    "changed" by structure.
+  - Layer 1 still classifies the file as **modified**, with the region
+    `0x500–0x501`, so nothing is hidden.
+  - But the report then says the difference is "outside the functions… data,
+    resources or layout", which is wrong here. Stage 7 fixes that text.
+- Honest scale: the measured improvement on this pair is one row. Address keying
+  matters most when engines name *real* symbols differently, for example Diaphora
+  with IDA's names against Ghidra's. That case could not be measured without IDA.
