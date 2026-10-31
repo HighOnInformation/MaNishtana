@@ -106,10 +106,11 @@ def summarize(path_a, path_b, ignore_strings=None):
 
     regions, total, code_regions = [], 0, None
     if data_a is not None and data_b is not None:
-        regions, blocks = _regions(normalize(data_a, ignore_strings)[0],
-                                   normalize(data_b, ignore_strings)[0])
+        norm_a = normalize(data_a, ignore_strings)[0]
+        norm_b = normalize(data_b, ignore_strings)[0]
+        regions, blocks = _regions(norm_a, norm_b)
         total = len(blocks)
-        code_regions = _count_in_code(blocks, data_a, data_b)
+        code_regions = _count_in_code(blocks, norm_a, norm_b)
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
@@ -457,11 +458,22 @@ def _regions(data_a, data_b):
 
 
 def _count_in_code(blocks, data_a, data_b):
-    """How many differing regions overlap code on either side; None if unknown.
+    """How many differing regions have differing bytes in code; None if unknown.
 
     The report uses it to tell "the bytes that differ are code, yet no engine
-    found a changed function" from "the difference is in data". Unknown (None)
-    for formats without code ranges or headers that cannot be read.
+    found a changed function" from "the difference is in data". Two things keep
+    it from over-claiming:
+
+      * Each 4 KiB-granular region is trimmed to its first and last differing
+        byte before the test, so a data change that merely shares a block with
+        the end of .text is not code.
+      * It asks _exact_code_ranges, not _code_ranges. The latter errs wide on
+        purpose (headers, alignment padding, read-only data in an executable
+        segment) because there a wrong "code" only means less normalization;
+        here a wrong "code" sends the reader to a disassembler for a version
+        field.
+
+    Unknown (None) for formats without code ranges or headers that cannot be read.
     """
     code = []
     for data in (data_a, data_b):
@@ -469,11 +481,60 @@ def _count_in_code(blocks, data_a, data_b):
         if kind is None:
             return None
         try:
-            code.extend(_code_ranges(bytearray(data), kind))
+            code.extend(_exact_code_ranges(bytearray(data), kind))
         except (struct.error, IndexError, ValueError):
             return None
-    return sum(1 for start, stop in blocks
-               if any(start < hi and lo < stop for lo, hi in code))
+    count = 0
+    common = min(len(data_a), len(data_b))
+    for start, stop in blocks:
+        if not any(start < hi and lo < stop for lo, hi in code):
+            continue
+        if start < common:
+            stop = min(stop, common)
+            while start < stop and data_a[start] == data_b[start]:
+                start += 1
+            while stop > start and data_a[stop - 1] == data_b[stop - 1]:
+                stop -= 1
+        if any(start < hi and lo < stop for lo, hi in code):
+            count += 1
+    return count
+
+
+def _exact_code_ranges(buf, fmt):
+    """Where code is, as precisely as the file says: for describing, not protecting.
+
+    PE: executable sections' raw data, no headers, no alignment widening.
+    ELF: SHF_EXECINSTR sections when the section table can be read; otherwise the
+    executable segments (wider, but the best the file offers).
+    """
+    if fmt == "pe":
+        pe = _u32(buf, 0x3C)
+        if bytes(buf[pe:pe + 4]) != b"PE\x00\x00":
+            raise ValueError("no PE signature")
+        count = _u16(buf, pe + 6)
+        table = pe + 24 + _u16(buf, pe + 20)
+        ranges = []
+        for index in range(count):
+            at = table + index * 40
+            raw_size, raw_off = struct.unpack_from("<II", buf, at + 16)
+            if _u32(buf, at + 36) & (_SCN_MEM_EXECUTE | _SCN_CNT_CODE):
+                ranges.append((raw_off, raw_off + raw_size))
+        return ranges
+    if fmt == "elf":
+        end = "<" if buf[5] == 1 else ">"
+        wide = buf[4] == 2
+        if wide:
+            phoff, shoff = struct.unpack_from(end + "QQ", buf, 0x20)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(end + "HHHH", buf, 0x36)
+        else:
+            phoff, shoff = struct.unpack_from(end + "II", buf, 0x1C)
+            phentsize, phnum, shentsize, shnum = struct.unpack_from(end + "HHHH", buf, 0x2A)
+        try:
+            sections = _elf_exec_sections(buf, end, wide, shoff, shentsize, shnum)
+        except (struct.error, IndexError, ValueError):
+            sections = []
+        return sections or _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum)
+    return []
 
 
 def _strings(data):

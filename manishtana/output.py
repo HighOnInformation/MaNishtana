@@ -607,11 +607,13 @@ def _html_inline(runs):
 
 
 def _function_rows(found, limit):
-    """(disputed rows, agreed rows, hidden count), disagreements first.
+    """Disagreements first: a namedtuple of the rows and the true group sizes.
 
     Each row: (name, address, status, similarity, engines). A function the engines
     disagree on is where a reviewer should look first, so those come out of the
-    main table into their own, ahead of it; the cap counts both together.
+    main table into their own, ahead of it; the cap counts both together. The
+    totals are returned separately so a heading never reports how many rows fit
+    under the cap as if it were how many functions there are.
     """
     disputed, agreed = [], []
     for change in found.changes:
@@ -631,7 +633,25 @@ def _function_rows(found, limit):
             engines = ", ".join(sorted(change.views))
         rows[0 if is_disputed else 1].append(
             (name, _address(change), change.status, similarity, engines))
-    return rows[0], rows[1], max(0, len(found.changes) - limit)
+    return _Rows(rows[0], rows[1], len(disputed), len(agreed),
+                 max(0, len(disputed) - limit),
+                 max(0, len(found.changes) - limit))
+
+
+_Rows = collections.namedtuple(
+    "_Rows", "disputed agreed disputed_total agreed_total disputed_hidden hidden")
+
+
+def _group_title(label, shown, total):
+    return "%s (%d)" % (label, total) if shown == total else \
+        "%s (%d of %d shown)" % (label, shown, total)
+
+
+def _hidden_note(rows):
+    note = "%d more not listed (`binary.max_functions`)" % rows.hidden
+    if rows.disputed_hidden:
+        note += ", %d of them disagreements" % rows.disputed_hidden
+    return note + "; the JSON output (`-j`) has them all."
 
 
 def _address(change):
@@ -660,10 +680,11 @@ def _no_function_note(summary):
     """
     in_code = getattr(summary, "code_regions", None) if summary is not None else None
     if in_code:
-        return ("The bytes that differ include code (%d region%s, listed above), yet no "
-                "engine found a changed function. Engines judge a function by its "
-                "structure; a changed constant, offset or call target can leave that "
-                "intact. Inspect those bytes in a disassembler."
+        return ("Some of the bytes that differ are code (%d differing region%s in code; "
+                "the summary above lists the first regions), yet no engine found a "
+                "changed function. Engines judge a function by its structure; a "
+                "changed constant, offset or call target can leave that intact. "
+                "Inspect those bytes in a disassembler."
                 % (in_code, "" if in_code == 1 else "s"))
     if in_code == 0:
         return ("The bytes that differ are all outside code — data, resources or "
@@ -678,25 +699,35 @@ def _md_functions(found, limit, summary=None):
     if not found.changes:
         out.append(_no_function_note(summary) + "\n")
         return out
-    disputed, agreed, hidden = _function_rows(found, limit)
-    for title, rows in (("**Engines disagree — look here first** (%d)" % len(disputed),
-                         disputed),
-                        ("**Engines agree** (%d)" % len(agreed) if disputed else None,
-                         agreed)):
-        if not rows:
+    rows = _function_rows(found, limit)
+    with_address = any(row[1] for row in rows.disputed + rows.agreed)
+    for title, group in (
+            (_group_title("**Engines disagree — look here first**", len(rows.disputed),
+                          rows.disputed_total), rows.disputed),
+            (_group_title("**Engines agree**", len(rows.agreed), rows.agreed_total)
+             if rows.disputed_total else None, rows.agreed)):
+        if not group:
             continue
         if title:
             out.append(title)
             out.append("")
-        out.append("| Function | Address | Status | Similarity | Engines |")
-        out.append("|---|---|---|---|---|")
-        for name, address, status, similarity, engines in rows:
-            out.append("| `%s` | %s | %s | %s | %s |" % (name.replace("|", "\\|"), address,
-                                                      status, similarity, engines))
+        if with_address:
+            out.append("| Function | Address | Status | Similarity | Engines |")
+            out.append("|---|---|---|---|---|")
+        else:
+            out.append("| Function | Status | Similarity | Engines |")
+            out.append("|---|---|---|---|")
+        for name, address, status, similarity, engines in group:
+            # MSVC names can hold a backtick (`anonymous namespace'::f): a plain
+            # code span would end there, so such a name gets a double-backtick span.
+            cells = [_md_inline([(name, True)]).replace("|", "\\|")]
+            if with_address:
+                cells.append(address or "—")
+            cells.extend([status, similarity, engines])
+            out.append("| %s |" % " | ".join(cells))
         out.append("")
-    if hidden:
-        out.append("%d more not listed (`binary.max_functions`); the JSON output has them "
-                   "all.\n" % hidden)
+    if rows.hidden:
+        out.append(_hidden_note(rows) + "\n")
     return out
 
 
@@ -706,27 +737,30 @@ def _html_functions(found, limit, summary=None):
     if not found.changes:
         parts.append('<p class="empty">%s</p>' % escape(_no_function_note(summary)))
         return "\n".join(parts)
-    disputed, agreed, hidden = _function_rows(found, limit)
-    for title, rows, css in (("Engines disagree — look here first (%d)" % len(disputed),
-                              disputed, "functions disputed"),
-                             ("Engines agree (%d)" % len(agreed) if disputed else None,
-                              agreed, "functions")):
-        if not rows:
+    rows = _function_rows(found, limit)
+    with_address = any(row[1] for row in rows.disputed + rows.agreed)
+    for title, group, css in (
+            (_group_title("Engines disagree — look here first", len(rows.disputed),
+                          rows.disputed_total), rows.disputed, "functions disputed"),
+            (_group_title("Engines agree", len(rows.agreed), rows.agreed_total)
+             if rows.disputed_total else None, rows.agreed, "functions")):
+        if not group:
             continue
         if title:
             parts.append('<p class="fn-head">%s</p>' % escape(title))
-        parts.append('<table class="%s"><thead><tr><th>Function</th><th>Address</th>'
-                     "<th>Status</th><th>Similarity</th><th>Engines</th></tr></thead><tbody>"
-                     % css)
-        for name, address, status, similarity, engines in rows:
-            parts.append('<tr data-status="%s"><td><code>%s</code></td><td><code>%s</code>'
-                         "</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                         % (escape(status), escape(name), escape(address), escape(status),
-                            escape(similarity), escape(engines)))
+        head = "<th>Function</th>" + ("<th>Address</th>" if with_address else "")
+        parts.append('<table class="%s"><thead><tr>%s<th>Status</th><th>Similarity</th>'
+                     "<th>Engines</th></tr></thead><tbody>" % (css, head))
+        for name, address, status, similarity, engines in group:
+            cells = "<td><code>%s</code></td>" % escape(name)
+            if with_address:
+                cells += "<td><code>%s</code></td>" % escape(address or "—")
+            parts.append('<tr data-status="%s">%s<td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (escape(status), cells, escape(status), escape(similarity),
+                            escape(engines)))
         parts.append("</tbody></table>")
-    if hidden:
-        parts.append('<p class="empty">%d more not listed (binary.max_functions); the JSON '
-                     "output has them all.</p>" % hidden)
+    if rows.hidden:
+        parts.append('<p class="empty">%s</p>' % escape(_hidden_note(rows).replace("`", "")))
     return "\n".join(parts)
 
 

@@ -609,7 +609,8 @@ class FunctionRendering(unittest.TestCase):
         md = build_report("v1", "v2", self.comparison, {"app.exe": "model says"}, None,
                           **self.kwargs)
         self.assertIn("**Function-level diff** (diaphora): 1 modified, 1 added.", md)
-        self.assertIn("| `parse` |  | modified | 0.75 | diaphora |", md)
+        self.assertIn("| `parse` | modified | 0.75 | diaphora |", md)   # no addresses: no column
+        self.assertNotIn("Address", md)
         self.assertIn("Show decompiled diff", md)
         self.assertIn("model says", md)
 
@@ -643,7 +644,7 @@ class FunctionRendering(unittest.TestCase):
         # The real case behind this: a flipped byte inside a call instruction.
         # BinDiff and ghidriff both judge by structure and both missed it.
         md = self._no_function_report(1)
-        self.assertIn("The bytes that differ include code (1 region, listed above)", md)
+        self.assertIn("Some of the bytes that differ are code (1 differing region in code", md)
         self.assertNotIn("data, resources or layout — which is why", md)
 
     def test_only_data_differs(self):
@@ -655,7 +656,7 @@ class FunctionRendering(unittest.TestCase):
         html = build_html("v1", "v2", self.comparison, {}, None,
                           binary={"app.exe": self.summary._replace(code_regions=2)},
                           functions={"app.exe": empty})
-        self.assertIn("include code (2 regions", html)
+        self.assertIn("(2 differing regions in code", html)
 
     def test_long_lists_are_capped(self):
         many = FunctionDiff(["diaphora"], [
@@ -1454,6 +1455,78 @@ class BinDiffHighAddresses(unittest.TestCase):
                 handle.write(binexport([(high, "k", 0)]))
         changes = _read_bindiff(db, old, new)
         self.assertEqual([(c.status, c.address_a) for c in changes], [("modified", high)])
+
+
+class ReportReviewRegressions(unittest.TestCase):
+    """Cases found by an independent review of the stage 7 report."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _summary(self, old, new):
+        a = os.path.join(self.work, "a.exe")
+        b = os.path.join(self.work, "b.exe")
+        with open(a, "wb") as handle:
+            handle.write(old)
+        with open(b, "wb") as handle:
+            handle.write(new)
+        return summarize(a, b)
+
+    def test_data_next_to_code_in_the_same_block_is_not_code(self):
+        code_pe = make_pe(section_flags=0x60000020)[0]       # code section at 0x200-0x400
+        old = code_pe + b"\x00" * 0x100                         # trailing data, same 4 KiB block
+        new = bytearray(old)
+        new[0x480] = 0x41
+        summary = self._summary(old, bytes(new))
+        self.assertEqual(summary.regions, [(0x480, 0x481)])
+        self.assertEqual(summary.code_regions, 0)
+
+    def test_a_header_field_is_not_code(self):
+        old = make_pe(section_flags=0x60000020)[0]
+        new = bytearray(old)
+        new[PE_OFF + 4 + 20 + 48] = 7                          # MajorImageVersion
+        self.assertEqual(self._summary(old, bytes(new)).code_regions, 0)
+
+    def test_a_real_code_byte_still_counts(self):
+        old, offsets = make_pe(section_flags=0x60000020)
+        new = bytearray(old)
+        new[offsets["code"]] ^= 0xFF
+        self.assertEqual(self._summary(old, bytes(new)).code_regions, 1)
+
+    def _found(self, disputed, agreed):
+        changes = [FunctionChange("d%d" % i, "d%d" % i, "modified", 0.5,
+                                  {"bindiff": "modified", "ghidriff": "unchanged"}, None,
+                                  0x1000 + i, 0x1000 + i) for i in range(disputed)]
+        changes += [FunctionChange("a%d" % i, "a%d" % i, "modified", 0.5,
+                                   {"bindiff": "modified", "ghidriff": "modified"}, None,
+                                   0x2000 + i, 0x2000 + i) for i in range(agreed)]
+        return FunctionDiff(["bindiff", "ghidriff"], changes, [])
+
+    def _md(self, found, limit):
+        summary = BinarySummary("pe", 1, 1, "a", "b", [(0, 1)], 1, [], [], 0, 0)
+        return build_report("v1", "v2", binary_comparison({"a.exe": ("M", ["a.exe"])}), {},
+                            None, binary={"a.exe": summary}, functions={"a.exe": found},
+                            max_functions=limit)
+
+    def test_headings_give_true_totals_when_the_cap_cuts(self):
+        md = self._md(self._found(3, 5), 2)
+        self.assertIn("**Engines disagree — look here first** (2 of 3 shown)", md)
+        self.assertIn("6 more not listed (`binary.max_functions`), 1 of them disagreements", md)
+        md = self._md(self._found(3, 5), 4)
+        self.assertIn("**Engines disagree — look here first** (3)", md)
+        self.assertIn("**Engines agree** (1 of 5 shown)", md)
+
+
+class MarkdownNames(unittest.TestCase):
+    def test_a_backtick_in_a_function_name_keeps_the_table_intact(self):
+        name = "`anonymous namespace'::operator|"
+        found = FunctionDiff(["bindiff"], [FunctionChange(name, name, "modified", 0.5,
+                                                          {"bindiff": "modified"}, None)], [])
+        summary = BinarySummary("pe", 1, 1, "a", "b", [(0, 1)], 1, [], [], 0, 0)
+        md = build_report("v1", "v2", binary_comparison({"a.exe": ("M", ["a.exe"])}), {}, None,
+                          binary={"a.exe": summary}, functions={"a.exe": found})
+        self.assertIn("| `` `anonymous namespace'::operator\\| `` | modified |", md)
 
 
 if __name__ == "__main__":
