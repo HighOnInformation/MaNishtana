@@ -26,7 +26,7 @@ from .llm import Analysis, analyze_changes, http_chat
 from .output import build_html, build_json, build_report
 from .settings import load as load_settings
 from .symbols import cross_reference
-from . import gitrepo
+from . import binengines, gitrepo
 
 
 def main(argv=None):
@@ -47,6 +47,15 @@ def main(argv=None):
     except ValueError as exc:
         sys.stderr.write("Error: %s\n" % exc)
         return 2
+
+    if args.check_binary_tools:
+        sys.stdout.write(binengines.describe_tools(binengines.discover(settings.binary)))
+        return 0
+
+    engines = _selected_engines(args, settings)
+    if engines is None:
+        return 2
+    args.engines = engines
 
     if args.git:
         return _run_git(args, config, settings)
@@ -116,10 +125,25 @@ def _run(args, config, settings, dir_a, dir_b, commits):
     llm = config.get("llm") or {}
     comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
     xref = cross_reference(comparison.sections, dir_b)
-    binary = {
-        rel: summarize_binary(old, new)
-        for rel, (old, new) in binary_pairs(comparison, dir_a, dir_b).items()
-    }
+    pairs = binary_pairs(comparison, dir_a, dir_b)
+    binary = {rel: summarize_binary(old, new) for rel, (old, new) in pairs.items()}
+    functions = _binary_functions(args.engines, settings, pairs)
+
+    # Decompiled diffs reach the model through the ordinary per-file pass: the
+    # binary gets a text section and stops counting as "not analysed". llm.py
+    # needs no knowledge of binaries for this.
+    decompiled = {}
+    for rel, found in functions.items():
+        text = binengines.decompiled_diff(found.changes, settings.binary["max_decompiled"])
+        if text:
+            decompiled[rel] = text
+    for_model = comparison
+    if decompiled:
+        sections = dict(comparison.sections)
+        header = settings.prompts["decompiled_header"]
+        sections.update((rel, header + text) for rel, text in decompiled.items())
+        for_model = comparison._replace(sections=sections,
+                                        binaries=comparison.binaries - set(decompiled))
 
     # The author's own account of the change is withheld unless asked for: a model
     # shown it restates it, and the report is worth more when it can be checked
@@ -133,7 +157,7 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         warn("llm.base_url is not set in the config — producing the report without LLM analysis.")
     else:
         result = analyze_changes(
-            comparison,
+            for_model,
             http_chat(llm),
             prompts=settings.prompts,
             xref=xref,
@@ -150,6 +174,9 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         "commits": commits,
         "intent_shown": bool(intent),
         "binary": binary,
+        "functions": functions,
+        "decompiled": decompiled,
+        "max_functions": settings.binary["max_functions"],
     }
     report = build_report(dir_a, dir_b, comparison, analyses, summary, **shared)
     if not _write(args.output, report, "report"):
@@ -172,6 +199,53 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         % (args.output, len(comparison.real), len(comparison.noise), len(comparison.skipped))
     )
     return 0
+
+
+def _selected_engines(args, settings):
+    """The engines to try: --binary-engines if given, else the config's list."""
+    if args.binary_engines is None:
+        names = list(settings.binary["engines"])
+    elif args.binary_engines.strip().lower() == "none":
+        return []
+    else:
+        names = [name.strip().lower() for name in args.binary_engines.split(",") if name.strip()]
+    unknown = [name for name in names if name not in binengines.ENGINES]
+    if unknown:
+        sys.stderr.write("Error: unknown binary engine(s): %s — known: %s, or none.\n"
+                         % (", ".join(unknown), ", ".join(binengines.ENGINES)))
+        return None
+    return names
+
+
+def _binary_functions(engines, settings, pairs):
+    """Run the available engines on every binary that exists on both sides.
+
+    An added or deleted binary has nothing to diff against, so it gets layer 1
+    only. Tools are discovered once per run, and a wanted engine that cannot run
+    is warned about once, not once per file.
+    """
+    both = dict((rel, pair) for rel, pair in pairs.items() if pair[0] and pair[1])
+    if not engines or not both:
+        return {}
+    tools = binengines.discover(settings.binary)
+    ready = binengines.runnable(tools)
+    usable = [name for name in engines if name in ready]
+    missing = [name for name in engines if name not in ready]
+    if missing:
+        warn("binary engine(s) not available: %s — run with --check-binary-tools to see "
+             "what is missing." % ", ".join(missing))
+    if not usable:
+        return {}
+    functions = {}
+    for rel in sorted(both):
+        old, new = both[rel]
+        print("Diffing functions in %s with %s ..." % (rel, ", ".join(usable)))
+        found = binengines.diff_functions(old, new, usable, tools, settings.binary)
+        for note in found.notes:
+            warn("%s: %s" % (rel, note))
+        if found.engines:
+            functions[rel] = found
+    return functions
 
 
 def _parse_args(argv):
@@ -227,6 +301,19 @@ def _parse_args(argv):
     )
     parser.add_argument(
         "--no-llm", action="store_true", help="skip LLM analysis and produce a diff-only report"
+    )
+    parser.add_argument(
+        "--binary-engines",
+        metavar="LIST",
+        help="function-level engines to run on changed binaries, comma-separated (%s), "
+        "or 'none'. Default: the config's binary.engines; engines whose tools are "
+        "missing are skipped with a warning." % ", ".join(binengines.ENGINES),
+    )
+    parser.add_argument(
+        "--check-binary-tools",
+        action="store_true",
+        help="report which binary comparison tools (IDA, Hex-Rays, Diaphora, ...) were "
+        "found and which engines can run, then exit",
     )
     return parser.parse_args(argv)
 

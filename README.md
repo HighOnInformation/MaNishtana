@@ -345,6 +345,50 @@ normalized bytes, so a time stamp is not one of them; differences within 4 KB of
 each other are one region) and the printable strings of 8+ characters added and
 removed — often the quickest clue to what changed.
 
+### Function-level comparison — optional engines
+
+For a binary that really changed and exists on both sides, MaNishtana can also ask
+a disassembler which **functions** were modified, added or removed. Each engine is
+optional; whichever are installed run, the rest are skipped with one warning.
+
+| Engine | Needs | Gives |
+|---|---|---|
+| `diaphora` | IDA (`idat64`/`idat`) and [Diaphora](https://github.com/joxeankoret/diaphora)'s `diaphora.py`; Hex-Rays for pseudo-code | function matches with a similarity ratio, and a decompiled diff per changed function |
+
+```json
+"binary": {
+  "engines": ["diaphora"],
+  "ida": "C:/Program Files/IDA Professional 9.1",
+  "diaphora": "C:/tools/diaphora",
+  "python": "",
+  "timeout_sec": 1800,
+  "max_functions": 200,
+  "max_decompiled": 30
+}
+```
+
+`ida` and `diaphora` may be a directory or the file itself. Left empty, they are
+looked for in `IDADIR` / `DIAPHORA_DIR`, then on `PATH`, then (on Windows) under
+`C:\Program Files\IDA*`. `python` runs Diaphora's diff step, which happens outside
+IDA; empty means the interpreter running MaNishtana. `timeout_sec` applies to each
+IDA run. `max_functions` caps the table in the report (JSON always has them all);
+`max_decompiled` caps how many of the most changed functions' pseudo-code go to the
+model.
+
+```bash
+python -m manishtana --check-binary-tools -c config.json     # what was found, what can run
+python -m manishtana v1 v2 --binary-engines diaphora          # choose engines for one run
+python -m manishtana v1 v2 --binary-engines none              # layer 1 only
+```
+
+Binaries are copied to a private temporary directory before IDA sees them — IDA
+writes its database next to its input, and the input is someone else's tree.
+
+When pseudo-code is available, the binary is no longer "not analysed": its
+decompiled diff goes through the ordinary per-file model pass, behind the
+`decompiled_header` prompt (configurable like every prompt) that tells the model it
+is reading decompiler output, not source.
+
 ### `prompts` — what the model is told
 
 ```json
@@ -427,7 +471,11 @@ so a report is traceable to what produced it — and per-file `risk`, `analysis`
 `diff`. A real binary also has `binary_detail`: `format`, `size_a`, `size_b`,
 `sha_a`, `sha_b`, `regions` (pairs of byte offsets), `regions_total`, and
 `strings_added`/`strings_removed` (at most 20 each) with their `_total` counts. It
-is `null` for text files. (Schema 3 added it; 2 added `commits`.)
+is `null` for text files. When an engine ran, `binary_functions` holds `engines`
+(the ones that succeeded) and `changes`: `name_a`, `name_b`, `status`
+(`modified`/`added`/`removed`), `similarity` (0–1, `null` for added and removed),
+`views` (each engine's status for that function — `unchanged` when an engine matched
+it as identical) and `pseudo_diff`. (Schema 3 added both; 2 added `commits`.)
 
 **`risk` and `analysis` are genuinely nullable.** Binaries are never analysed, a
 dead endpoint yields nothing, and files past `max_files` get no prose. Combined
@@ -466,6 +514,13 @@ JSON rendering including HTML escaping. No git, no normalizers, no network.
   firmware images and installers are compared byte for byte, so a rebuild of those
   counts as a real change. Build paths embedded in strings (`__FILE__`, debug info)
   are not normalized either: a binary built in a different directory differs.
+- **The Diaphora adapter has not been run against a real IDA here.** Its command
+  lines are Diaphora's own (from its test harness) and its result reading was
+  checked against Diaphora's real diff step, but the IDA export itself must be
+  verified on a machine that has IDA: `--check-binary-tools`, then one run.
+- **Function names are what the disassembler recovers.** On a stripped binary they
+  are `sub_401000`-style addresses, and a function that moved is matched by
+  structure, not by name.
 - **The cross-reference reads text, not C.** A name in a comment counts as a
   reference.
 - **In `--git` mode the report's "Directory A/B" rows name temporary paths** that

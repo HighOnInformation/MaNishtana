@@ -8,8 +8,11 @@ that has each noise field the normalizer must erase, at a known offset, so a tes
 can say exactly which bytes changed and which must not have.
 """
 
+import contextlib
+import io
 import os
 import shutil
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -17,10 +20,21 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manishtana.binnoise import normalize, summarize
+from manishtana.binengines import (
+    FunctionChange,
+    FunctionDiff,
+    decompiled_diff,
+    describe_tools,
+    diff_functions,
+    discover,
+    runnable,
+)
+from manishtana.binnoise import BinarySummary, normalize, summarize
+from manishtana.cli import main
 from manishtana.compare import Comparison, binary_pairs
 from manishtana.output import build_html, build_json, build_report
 from manishtana.rules import BINARY_STEP, prepare_copy
+from manishtana.settings import load as load_settings
 
 
 # --- synthetic binaries ------------------------------------------------------
@@ -370,6 +384,271 @@ class BinaryRendering(unittest.TestCase):
         self.assertIn("Binary file — not analyzed", md)
         payload = build_json("v1", "v2", self.comparison, {}, None)
         self.assertIsNone(payload["real"][0]["binary_detail"])
+
+
+# --- layer 2: engines --------------------------------------------------------
+
+
+def write_db(path, statements):
+    con = sqlite3.connect(path)
+    try:
+        for sql, rows in statements:
+            if rows is None:
+                con.execute(sql)
+            else:
+                con.executemany(sql, rows)
+        con.commit()
+    finally:
+        con.close()
+
+
+OLD_CODE = {
+    "parse": "int parse(char *s)\n{\n  return atoi(s);\n}\n",
+    "legacy": "void legacy(void)\n{\n}\n",
+    "same": "int same(void)\n{\n  return 1;\n}\n",
+}
+NEW_CODE = {
+    "parse": "int parse(char *s)\n{\n  if (!s)\n    return -1;\n  return atoi(s);\n}\n",
+    "fresh": "int fresh(int x)\n{\n  return x * 2;\n}\n",
+    "same": OLD_CODE["same"],
+}
+
+
+class FakeEngines:
+    """Stands in for the run seam. Writes what IDA+Diaphora would, records argv."""
+
+    def __init__(self, export_fails=False, with_pseudocode=True):
+        self.calls = []
+        self.export_fails = export_fails
+        self.with_pseudocode = with_pseudocode
+
+    def __call__(self, argv, cwd, env, timeout):
+        self.calls.append((list(argv), env))
+        if argv[0].endswith(("idat64", "idat64.exe")):
+            if self.export_fails:
+                return 4, "IDA: license problem\n"
+            side = os.path.basename(os.path.dirname(argv[-1]))
+            code = OLD_CODE if side == "old" else NEW_CODE
+            rows = [(name, text if self.with_pseudocode else None)
+                    for name, text in sorted(code.items())]
+            write_db(env["DIAPHORA_EXPORT_FILE"], [
+                ("create table functions (id integer primary key, name varchar(255), "
+                 "pseudocode text)", None),
+                ("insert into functions (name, pseudocode) values (?, ?)", rows),
+            ])
+            return 0, "exported\n"
+        out = argv[argv.index("-o") + 1]
+        write_db(out, [
+            ("create table results (type, line, address, name, address2, name2, ratio, "
+             "nodes1, nodes2, description)", None),
+            ("create table unmatched (type, line, address, name)", None),
+            ("insert into results values (?,?,?,?,?,?,?,?,?,?)", [
+                ("best", "00000", "00401000", "same", "00401000", "same", "1.000", 1, 1,
+                 "Same name"),
+                ("partial", "00001", "00401100", "parse", "00401100", "parse", "0.750", 3, 4,
+                 "Pseudo-code fuzzy hash"),
+            ]),
+            ("insert into unmatched values (?,?,?,?)", [
+                ("primary", "00000", "00402000", "legacy"),
+                ("secondary", "00000", "00403000", "fresh"),
+            ]),
+        ])
+        return 0, "diffed\n"
+
+
+class EngineSetup(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.ida_dir = os.path.join(self.work, "IDA Pro 9")
+        os.makedirs(os.path.join(self.ida_dir, "plugins"))
+        self.idat = os.path.join(self.ida_dir, "idat64.exe")
+        open(self.idat, "wb").close()
+        open(os.path.join(self.ida_dir, "plugins", "hexx64.dll"), "wb").close()
+        self.diaphora = os.path.join(self.work, "diaphora", "diaphora.py")
+        os.makedirs(os.path.dirname(self.diaphora))
+        open(self.diaphora, "wb").close()
+        self.old = os.path.join(self.work, "old.exe")
+        self.new = os.path.join(self.work, "new.exe")
+        for path in (self.old, self.new):
+            with open(path, "wb") as handle:
+                handle.write(b"MZ")
+        self.binary = load_settings({"binary": {
+            "ida": self.ida_dir, "diaphora": os.path.dirname(self.diaphora),
+            "python": "py3"}}, ".").binary
+        self.tools = discover(self.binary)
+
+
+class Discover(EngineSetup):
+    def test_config_directories_are_searched(self):
+        self.assertEqual(self.tools["idat"], os.path.abspath(self.idat))
+        self.assertTrue(self.tools["hexrays"].endswith("hexx64.dll"))
+        self.assertEqual(self.tools["diaphora"], os.path.abspath(self.diaphora))
+        self.assertEqual(self.tools["python"], "py3")
+        self.assertEqual(runnable(self.tools), ["diaphora"])
+
+    def test_nothing_configured_or_installed_means_nothing_runnable(self):
+        tools = {"idat": None, "hexrays": None, "diaphora": None, "python": "x"}
+        self.assertEqual(runnable(tools), [])
+        report = describe_tools(tools)
+        self.assertIn("not found", report)
+        self.assertIn("Runnable: none", report)
+
+    def test_report_names_paths_and_ready_engines(self):
+        report = describe_tools(self.tools)
+        self.assertIn(os.path.abspath(self.idat), report)
+        self.assertIn("engine diaphora   ready", report)
+        self.assertIn("Runnable: diaphora", report)
+
+
+class DiaphoraAdapter(EngineSetup):
+    def test_functions_are_classified_and_identical_ones_dropped(self):
+        found = diff_functions(self.old, self.new, ["diaphora"], self.tools, self.binary,
+                               run=FakeEngines())
+        self.assertEqual(found.engines, ["diaphora"])
+        self.assertEqual(found.notes, [])
+        by_status = dict((c.status, c) for c in found.changes)
+        self.assertEqual(sorted(by_status), ["added", "modified", "removed"])
+        self.assertEqual(by_status["modified"].name_a, "parse")
+        self.assertAlmostEqual(by_status["modified"].similarity, 0.75)
+        self.assertEqual(by_status["removed"].name_a, "legacy")
+        self.assertEqual(by_status["added"].name_b, "fresh")
+        self.assertNotIn("same", [c.name_a for c in found.changes])
+        self.assertEqual(by_status["modified"].views, {"diaphora": "modified"})
+
+    def test_pseudo_code_diff_comes_from_the_exports(self):
+        found = diff_functions(self.old, self.new, ["diaphora"], self.tools, self.binary,
+                               run=FakeEngines())
+        modified = [c for c in found.changes if c.status == "modified"][0]
+        self.assertIn("+  if (!s)", modified.pseudo_diff)
+        self.assertIn("--- a/parse", modified.pseudo_diff)
+
+    def test_command_lines_and_environment(self):
+        fake = FakeEngines()
+        diff_functions(self.old, self.new, ["diaphora"], self.tools, self.binary, run=fake)
+        export_argv, export_env = fake.calls[0]
+        self.assertEqual(export_argv[:3], [self.tools["idat"], "-A", "-B"])
+        self.assertTrue(export_argv[3].startswith("-S"))
+        self.assertEqual(export_env["DIAPHORA_AUTO"], "1")
+        self.assertEqual(export_env["DIAPHORA_USE_DECOMPILER"], "1")   # hexx64 was found
+        # IDA writes its database next to the input: it must be a private copy.
+        self.assertNotEqual(os.path.dirname(export_argv[-1]), self.work)
+        diff_argv, _ = fake.calls[2]
+        self.assertEqual(diff_argv[:2], ["py3", self.tools["diaphora"]])
+        self.assertFalse(os.path.exists(self.old + ".i64"))
+
+    def test_a_path_with_spaces_is_quoted_for_ida(self):
+        tools = dict(self.tools, diaphora=os.path.join(self.work, "my tools", "diaphora.py"))
+        fake = FakeEngines()
+        diff_functions(self.old, self.new, ["diaphora"], tools, self.binary, run=fake)
+        self.assertEqual(fake.calls[0][0][3], '-S"%s"' % tools["diaphora"])
+
+    def test_no_decompiler_means_no_pseudo_code_but_still_a_match(self):
+        tools = dict(self.tools, hexrays=None)
+        fake = FakeEngines(with_pseudocode=False)
+        found = diff_functions(self.old, self.new, ["diaphora"], tools, self.binary, run=fake)
+        self.assertNotIn("DIAPHORA_USE_DECOMPILER", fake.calls[0][1])
+        self.assertEqual(len(found.changes), 3)
+        self.assertTrue(all(c.pseudo_diff is None for c in found.changes))
+
+    def test_a_failed_export_is_a_note_not_a_crash(self):
+        found = diff_functions(self.old, self.new, ["diaphora"], self.tools, self.binary,
+                               run=FakeEngines(export_fails=True))
+        self.assertEqual(found.engines, [])
+        self.assertEqual(found.changes, [])
+        self.assertIn("export of the old side failed", found.notes[0])
+        self.assertIn("license problem", found.notes[0])
+
+
+class DecompiledDiff(unittest.TestCase):
+    def _change(self, name, similarity, diff):
+        return FunctionChange(name, name, "modified", similarity, {"diaphora": "modified"}, diff)
+
+    def test_most_changed_first_and_capped(self):
+        changes = [self._change("a", 0.9, "--- a/a\n"), self._change("b", 0.2, "--- a/b\n"),
+                   self._change("c", 0.5, "--- a/c\n"), self._change("d", 0.1, None)]
+        text = decompiled_diff(changes, 2)
+        self.assertEqual(text.splitlines()[:2], ["--- a/b", "--- a/c"])
+        self.assertIn("1 more changed functions not shown", text)
+
+    def test_nothing_to_show(self):
+        self.assertIsNone(decompiled_diff([self._change("a", 0.5, None)], 5))
+
+
+class FunctionRendering(unittest.TestCase):
+    def setUp(self):
+        self.comparison = binary_comparison({"app.exe": ("M", ["app.exe"])})
+        self.summary = BinarySummary("pe", 10, 12, "a" * 64, "b" * 64, [(0, 2)], 1, [], [], 0, 0)
+        self.found = FunctionDiff(["diaphora"], [
+            FunctionChange("parse", "parse", "modified", 0.75, {"diaphora": "modified"},
+                           "--- a/parse\n+++ b/parse\n+  if (!s)\n"),
+            FunctionChange(None, "fresh", "added", None, {"diaphora": "added"}, None),
+        ], [])
+        self.kwargs = {"binary": {"app.exe": self.summary}, "functions": {"app.exe": self.found},
+                       "decompiled": {"app.exe": "--- a/parse\n+++ b/parse\n+  if (!s)\n"}}
+
+    def test_markdown_table_and_decompiled_diff(self):
+        md = build_report("v1", "v2", self.comparison, {"app.exe": "model says"}, None,
+                          **self.kwargs)
+        self.assertIn("**Function-level diff** (diaphora): 1 modified, 1 added.", md)
+        self.assertIn("| `parse` | modified | 0.75 | diaphora |", md)
+        self.assertIn("Show decompiled diff", md)
+        self.assertIn("model says", md)
+
+    def test_html_table(self):
+        html = build_html("v1", "v2", self.comparison, {}, None, **self.kwargs)
+        self.assertIn('<table class="functions">', html)
+        self.assertIn("<code>fresh</code>", html)
+        self.assertIn("Decompiled diff", html)
+
+    def test_json_functions(self):
+        payload = build_json("v1", "v2", self.comparison, {}, None, **self.kwargs)
+        functions = payload["real"][0]["binary_functions"]
+        self.assertEqual(functions["engines"], ["diaphora"])
+        self.assertEqual(functions["changes"][0]["status"], "modified")
+        self.assertEqual(functions["changes"][0]["similarity"], 0.75)
+
+    def test_engine_ran_and_found_no_function_change(self):
+        empty = FunctionDiff(["diaphora"], [], [])
+        md = build_report("v1", "v2", self.comparison, {}, None,
+                          binary={"app.exe": self.summary}, functions={"app.exe": empty})
+        self.assertIn("no function changed", md)
+        self.assertIn("data, resources or layout", md)
+
+    def test_long_lists_are_capped(self):
+        many = FunctionDiff(["diaphora"], [
+            FunctionChange("f%d" % i, "f%d" % i, "modified", 0.5, {"diaphora": "modified"}, None)
+            for i in range(5)], [])
+        md = build_report("v1", "v2", self.comparison, {}, None,
+                          binary={"app.exe": self.summary}, functions={"app.exe": many},
+                          max_functions=3)
+        self.assertIn("2 more not listed", md)
+
+
+class EngineFlags(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.config = os.path.join(self.work, "config.json")
+        with open(self.config, "w") as handle:
+            handle.write('{"rules": []}')
+
+    def _main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_unknown_engine_is_a_usage_error(self):
+        code, _out, err = self._main([self.work, self.work, "-c", self.config,
+                                      "--binary-engines", "nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("unknown binary engine", err)
+
+    def test_check_binary_tools_exits_zero(self):
+        code, out, _err = self._main(["--check-binary-tools", "-c", self.config])
+        self.assertEqual(code, 0)
+        self.assertIn("engine diaphora", out)
 
 
 if __name__ == "__main__":

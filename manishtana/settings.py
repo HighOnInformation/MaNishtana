@@ -2,7 +2,7 @@
 
 Public interface:
     load(config, base_dir) -> Settings
-    Settings   namedtuple(prompts, risk, normalizers, tuning, digest)
+    Settings   namedtuple(prompts, risk, normalizers, tuning, binary, digest)
 
 The prompts, the risk labels the extraction looks for, and the normalizer command
 lines are inputs, not code. On a closed network a reviewer has to be able to read
@@ -28,7 +28,7 @@ import hashlib
 import json
 import os
 
-Settings = collections.namedtuple("Settings", "prompts risk normalizers tuning digest")
+Settings = collections.namedtuple("Settings", "prompts risk normalizers tuning binary digest")
 
 _ORIENT_SYSTEM = """You are a senior engineer opening a source drop for review.
 
@@ -89,6 +89,7 @@ _PLACEHOLDERS = {
     "summary_system": (set(), set()),
     "summary_user": ({"manifest", "analyses"}, {"analyses"}),
     "summary_item": ({"path", "analysis"}, {"analysis"}),
+    "decompiled_header": (set(), set()),
 }
 
 _DEFAULT_PROMPTS = {
@@ -109,6 +110,15 @@ _DEFAULT_PROMPTS = {
     "summary_system": _SUMMARY_SYSTEM,
     "summary_user": "{manifest}\n\n{analyses}",
     "summary_item": "## {path}\n{analysis}",
+    # Put in front of a binary's decompiled diff, which takes the place of a text
+    # diff in the per-file pass. Without it the model reads pseudo-code as the
+    # author's source and comments on names and style the decompiler invented.
+    "decompiled_header": (
+        "This file is a compiled binary. What follows is not its source: it is a "
+        "unified diff of decompiler pseudo-code for the functions that changed, most "
+        "changed first. Variable names, types and structure were reconstructed by the "
+        "decompiler; judge behaviour, not style or naming.\n\n"
+    ),
 }
 
 _DEFAULT_RISK = {
@@ -127,6 +137,20 @@ _DEFAULT_NORMALIZERS = {
     "clang-format": "clang-format -style=LLVM -assume-filename={name}",
     "strip-comments": "gcc -fpreprocessed -dD -E -P -x c -",
     "json-sort": None,  # built at load: depends on the running interpreter
+}
+
+# Where the function-level engines live and how far to let them run. Paths are
+# empty by default: discovery then tries environment variables and PATH. They are
+# config, not code, because on Windows IDA is rarely on PATH and the air-gapped
+# box decides where things are installed.
+_DEFAULT_BINARY = {
+    "engines": ["diaphora"],
+    "ida": "",
+    "diaphora": "",
+    "python": "",
+    "timeout_sec": 1800,
+    "max_functions": 200,
+    "max_decompiled": 30,
 }
 
 _DEFAULT_TUNING = {
@@ -148,6 +172,7 @@ def load(config, base_dir="."):
         risk=_merge("risk", _DEFAULT_RISK, config.get("risk") or {}),
         normalizers=_normalizers(config.get("normalizers") or {}),
         tuning=_merge("tuning", _DEFAULT_TUNING, config.get("tuning") or {}),
+        binary=_merge("binary", _DEFAULT_BINARY, config.get("binary") or {}),
         digest=_digest(prompts),
     )
 

@@ -58,6 +58,7 @@ files are physically deleted from both copies before the second diff.
 common  ←  gitdiff, rules  ←  compare, symbols  ←  cli  →  llm, output
 settings  ←  llm, cli                    (settings imports nothing from the package)
 binnoise  ←  rules, cli                  (binnoise imports nothing from the package)
+binengines  ←  cli                       (binengines imports nothing from the package)
 ```
 
 Keep it that way. `output.py` and `llm.py` are leaves that `cli` wires together.
