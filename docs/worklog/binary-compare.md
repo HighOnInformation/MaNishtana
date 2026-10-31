@@ -604,3 +604,66 @@ Tests: `MergeReviewRegressions`, `GhidraRebase`, `BinDiffHighAddresses`. The
 reviewer's own script, pointed at the fixed code, shows every case behaving.
 **[Decided]** The rebase covers only `ET_DYN` with lowest load address 0, the
 verified case. Relocatable `.o` files are not rebased.
+
+### Stage 7 — `feature/binary-report` (from `feature/binary-merge`)
+
+**Goal:** a binary report a reviewer can act on. Show what to look at first, how
+to find each function, and say honestly what layer 1 knows when the engines see
+nothing.
+
+| Commit | What and why |
+|---|---|
+| `2256556` | Disagreements first, an address column, and a "no function changed" note that depends on `code_regions`. |
+| `f5d2259` | Merge of the fixed stage 6 (a merge, not a rebase, so nothing pushed was force-pushed; `format-patch` skips merge commits, so the replay is unchanged). |
+| (next) | Fixes from an independent review, a Markdown fix for names with backticks, and this worklog entry. |
+
+**Intent of each change**
+
+1. **`binnoise.py`**
+   - `BinarySummary.code_regions` is the number of differing regions with
+     differing bytes in code. It is `None` when the code cannot be located, and
+     it defaults to `None`, so existing constructions still work.
+   - `_count_in_code` trims each 4 KiB region to its first and last differing
+     byte, then tests it against `_exact_code_ranges`:
+     - PE: executable sections' raw data only. No headers, no alignment widening.
+     - ELF: `SHF_EXECINSTR` sections, else executable segments.
+   - **[Decided]** There are two code-range functions on purpose. `_code_ranges`
+     errs wide to *protect* bytes from `ignore_strings`; a wrong "code" there only
+     means less normalization. `_exact_code_ranges` *describes*; a wrong "code"
+     there sends the reader to a disassembler for a version field.
+2. **`output.py`**
+   - `_function_rows` returns a `_Rows` namedtuple with the true totals.
+   - Headings read "(N)", or "(k of N shown)" when the cap cuts. The hidden note
+     says how many of the hidden rows are disagreements.
+   - The disagreements table comes first and gets the `disputed` CSS class,
+     coloured with the `--accent` token.
+   - The Address column appears only when some row has an address (UIUX guide:
+     a blank never stands in for a state).
+   - `_no_function_note` gives one of three messages: code differs but no engine
+     saw it; all differences are outside code; or location unknown.
+   - Markdown names holding a backtick get a double-backtick span.
+3. **README**: a paragraph on the report, including the real case behind it.
+
+**Verification**
+
+- Unit tests: 260 OK.
+- **Real data.** The stage 6 run's BinDiff and ghidriff results for jq, re-rendered
+  with this code (`render_s7.py`):
+  - `patched.exe`: the differing byte is inside a `call rel32`. Neither engine
+    reports a changed function. The report now says *some of the bytes that
+    differ are code*, and points at region `0x500–0x501`. Stage 6 said "data,
+    resources or layout", which was wrong.
+  - `changed.exe`: "Engines disagree — look here first (21)", then "Engines
+    agree (60)". Every row has its address. The disagreements include a dubious
+    BinDiff match worth a human look (`sub_1400807E0 → pow`, similarity 0.00).
+- **Independent review** (a separate agent, reading cold) confirmed three
+  problems in `2256556`, each now fixed and each a regression test:
+  1. A data change in the same 4 KiB block as `.text` counted as code. Fixed by
+     trimming to the differing bytes.
+  2. A PE header field (MajorImageVersion) counted as code. Fixed by using exact
+     ranges.
+  3. Headings showed rows shown, not group totals, when `max_functions` cut. The
+     note did not mention hidden disagreements.
+  - Its scripts, pointed at the fixed code: data next to code gives 0, a header
+    field gives 0, a real code byte gives 1, and the headings show "2 of 3 shown"
+    and "1 of them disagreements".
