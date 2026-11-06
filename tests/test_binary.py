@@ -22,6 +22,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manishtana.binengines import (
+    _unified,
     _ghidra_rebase,
     _read_bindiff,
     _hex,
@@ -1528,6 +1529,93 @@ class MarkdownNames(unittest.TestCase):
                           binary={"a.exe": summary}, functions={"a.exe": found})
         self.assertIn("| `` `anonymous namespace'::operator\\| `` | modified |", md)
 
+
+# --- round 2 (2026-11-06): findings from jq 1.7 -> 1.7.1 ---------------------
+
+
+class DecompiledLineEndings(unittest.TestCase):
+    """Ghidra on Windows returns decompiled C with CRLF line ends. Kept as is, the
+    report (written in text mode) turned each into CR CR LF: a blank line after
+    every line of code."""
+
+    def test_crlf_in_engine_code_becomes_lf(self):
+        diff = _unified("f", "f", "int f(void)\r\n{\r\n  return 1;\r\n}\r\n",
+                        "int f(void)\r\n{\r\n  return 2;\r\n}\r\n")
+        self.assertNotIn("\r", diff)
+        self.assertIn("-  return 1;\n+  return 2;\n", diff)
+
+    def test_lone_cr_line_ends_too(self):
+        diff = _unified("f", None, "a\rb\r", None)
+        self.assertNotIn("\r", diff)
+        self.assertIn("-a\n-b\n", diff)
+
+    def test_line_ending_change_alone_is_not_a_difference(self):
+        self.assertIsNone(_unified("f", "f", "x;\r\ny;\r\n", "x;\ny;\n"))
+
+    def test_report_has_no_carriage_returns(self):
+        change = FunctionChange("f", "f", "modified", 0.5, {"ghidriff": "modified"},
+                                _unified("f", "f", "a\r\nb\r\n", "a\r\nc\r\n"))
+        summary = BinarySummary("pe", 1, 1, "a", "b", [(0, 1)], 1, [], [], 0, 0)
+        md = build_report("v1", "v2", binary_comparison({"a.exe": ("M", ["a.exe"])}), {},
+                          None, binary={"a.exe": summary},
+                          functions={"a.exe": FunctionDiff(["ghidriff"], [change], [])},
+                          decompiled={"a.exe": decompiled_diff([change], 10)})
+        self.assertNotIn("\r", md)
+        self.assertIn("-b\n+c\n", md)
+
+
+class ShortStrings(unittest.TestCase):
+    """Strings under 8 characters are mostly instruction bytes, but a version
+    ("1.7.1") or a terminal escape ("\\x1b[0;37m") is short and is exactly what a
+    reviewer wants to see change. Those two shapes are listed when they stand
+    alone as a C string: NUL before and NUL after."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _pair(self, old, new):
+        paths = []
+        for name, body in (("a", old), ("b", new)):
+            path = os.path.join(self.work, name)
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" * 64 + body + b"\x00" * 64)
+            paths.append(path)
+        return summarize(*paths)
+
+    def test_short_version_strings(self):
+        summary = self._pair(b"\x001.7\x00", b"\x001.7.1\x00")
+        self.assertEqual(summary.strings_added, ["1.7.1"])
+        self.assertEqual(summary.strings_removed, ["1.7"])
+
+    def test_version_with_prefix_and_suffix(self):
+        summary = self._pair(b"\x00v2.0\x00", b"\x00v2.1-rc\x00")
+        self.assertEqual(summary.strings_added, ["v2.1-rc"])
+        self.assertEqual(summary.strings_removed, ["v2.0"])
+
+    def test_ansi_escape_strings_shown_with_the_escape(self):
+        summary = self._pair(b"\x00\x1b[0;37m\x00\x1b[0m\x00",
+                             b"\x00\x1b[0;39m\x00\x1b[0m\x00")
+        self.assertEqual(summary.strings_added, ["\\x1b[0;39m"])
+        self.assertEqual(summary.strings_removed, ["\\x1b[0;37m"])
+
+    def test_other_short_strings_stay_hidden(self):
+        summary = self._pair(b"\x00abc12\x00H9t\x00\x1bt,H9\x00",
+                             b"\x00xyz34\x00L8u\x00\x1bu,L8\x00")
+        self.assertEqual(summary.strings_added, [])
+        self.assertEqual(summary.strings_removed, [])
+
+    def test_not_a_standalone_c_string(self):
+        # Instruction bytes can spell "1.2.3"; without a NUL on both sides it is
+        # not listed. A version inside a longer run is part of that run already.
+        summary = self._pair(b"\x011.2.3\x02 3.68\x00", b"\x011.2.4\x02 3.69\x00")
+        self.assertEqual(summary.strings_added, [])
+        self.assertEqual(summary.strings_removed, [])
+
+    def test_long_strings_unchanged(self):
+        summary = self._pair(b"\x00version 1.7.0\x00", b"\x00version 1.7.1\x00")
+        self.assertEqual(summary.strings_added, ["version 1.7.1"])
+        self.assertEqual(summary.strings_removed, ["version 1.7.0"])
 
 if __name__ == "__main__":
     unittest.main()

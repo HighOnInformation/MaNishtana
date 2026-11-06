@@ -47,6 +47,14 @@ _MAX_STRINGS = 20
 # Eight, not the usual four or six: shorter printable runs are mostly instruction
 # bytes that happen to be ASCII, and they bury the real string changes.
 _STRING_RE = re.compile(rb"[\x20-\x7e]{8,}")
+# Two short shapes are worth the exception, because they are what a release
+# changes: a version ("1.7.1") and a terminal escape ("\x1b[0;37m", a colour).
+# Each must stand alone as a C string (NUL or file start before, NUL after),
+# which instruction bytes spelling "1.2.3" by chance rarely do. Go and Rust pack
+# their strings without NULs; there a short version sits in a longer run instead.
+_SHORT_RE = re.compile(rb"(?<![\x01-\xff])(\x1b?[\x20-\x7e]{3,7})\x00")
+_VERSION_RE = re.compile(rb"v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.]+)?\Z")
+_ESCAPE_RE = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]\Z")
 
 # PE debug directory entry types whose payload is per-link noise.
 _DEBUG_CODEVIEW = 2
@@ -540,4 +548,9 @@ def _exact_code_ranges(buf, fmt):
 def _strings(data):
     if data is None:
         return set()
-    return set(match.decode("ascii") for match in _STRING_RE.findall(data))
+    found = set(match.decode("ascii") for match in _STRING_RE.findall(data))
+    for match in _SHORT_RE.finditer(data):
+        text = match.group(1)
+        if _ESCAPE_RE.match(text) or _VERSION_RE.match(text):
+            found.add(text.decode("ascii").replace("\x1b", "\\x1b"))
+    return found
