@@ -556,14 +556,21 @@ def _pseudocode(export):
 def _unified(name_a, name_b, text_a, text_b):
     if text_a is None and text_b is None:
         return None
-    lines_a = (text_a or "").splitlines(True)
-    lines_b = (text_b or "").splitlines(True)
+    # Ghidra on Windows hands back CRLF. Kept, each CR survives into the report,
+    # whose text-mode write on Windows adds another: CR CR LF, which renders as a
+    # blank line after every line of code. Line ends are not code; compare on LF.
+    lines_a = _lf(text_a).splitlines(True)
+    lines_b = _lf(text_b).splitlines(True)
     diff = "".join(difflib.unified_diff(
         lines_a, lines_b,
         "a/" + name_a if name_a else "/dev/null",
         "b/" + name_b if name_b else "/dev/null",
         n=3))
     return diff or None
+
+
+def _lf(text):
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 # --- internals: BinDiff ------------------------------------------------------
