@@ -48,6 +48,15 @@ _MAX_STRINGS = 20
 # bytes that happen to be ASCII, and they bury the real string changes.
 _STRING_RE = re.compile(rb"[\x20-\x7e]{8,}")
 
+# Round 1 finding 1: a version ("1.7.1") or an ANSI colour code ("0;39") is under
+# eight characters yet is exactly what a release changes. Only these two shapes
+# are admitted below the floor, and only standing alone between NULs (colour
+# codes: after an ESC), so instruction bytes that happen to be ASCII stay out.
+_SHORT_RE = re.compile(
+    rb"(?<=\x00)v?[0-9]{1,4}(?:\.[0-9]{1,4}){1,3}(?:[-+~][0-9A-Za-z.]{1,6})?(?=\x00)"
+    rb"|\x1b\[[0-9;]{1,12}m")
+_MAX_STRING = 200
+
 # PE debug directory entry types whose payload is per-link noise.
 _DEBUG_CODEVIEW = 2
 _DEBUG_REPRO = 16
@@ -114,8 +123,9 @@ def summarize(path_a, path_b, ignore_strings=None):
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
-    added = sorted(strings_b - strings_a)
-    removed = sorted(strings_a - strings_b)
+    special_a, special_b = _short_strings(data_a), _short_strings(data_b)
+    added = _ordered(strings_b - strings_a, special_b - special_a)
+    removed = _ordered(strings_a - strings_b, special_a - special_b)
 
     return BinarySummary(
         format=fmt,
@@ -535,6 +545,24 @@ def _exact_code_ranges(buf, fmt):
             sections = []
         return sections or _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum)
     return []
+
+
+def _ordered(plain, special):
+    """Short version/colour strings first, so the cap never hides them; long
+    strings (Rust packs all its text into one run) are shortened for display."""
+    return ([_shorten(item) for item in sorted(special)]
+            + [_shorten(item) for item in sorted(plain)])
+
+
+def _shorten(text):
+    return text if len(text) <= _MAX_STRING else text[:_MAX_STRING - 3] + "..."
+
+
+def _short_strings(data):
+    if data is None:
+        return set()
+    return set(match.decode("ascii").replace(chr(27), "\\e")
+               for match in _SHORT_RE.findall(data))
 
 
 def _strings(data):
