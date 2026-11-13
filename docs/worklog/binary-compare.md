@@ -680,3 +680,70 @@ nothing.
   - Its scripts, pointed at the fixed code: data next to code gives 0, a header
     field gives 0, a real code byte gives 1, and the headings show "2 of 3 shown"
     and "1 of them disagreements".
+
+---
+
+## Rounds on real releases (2026-11-05 onward)
+
+Only release binaries are downloaded; none is ever run. Ghidra 12.0.4 with JDK 21,
+ghidriff 1.0.0 (patched), Windows. Each round is `--no-llm`, bytes first, then
+`ghidriff`. Ground truth is `gh api repos/<o>/<r>/compare/<tagA>...<tagB>`.
+
+### Round 1 (2026-11-05): jq 1.7 → 1.7.1, PE (MinGW, stripped)
+
+Findings, all from comparing the report with the source diff:
+
+1. Strings under 8 characters are not listed, so the new version `1.7.1` and the
+   colour change `0;37` → `0;39` (8f81668) were missed. **Fixed** on
+   `feature/binary-short-strings` (version and escape shapes only, must stand alone).
+2. Compiler and runtime churn (MSYS2 GCC Rev2 → Rev3: timing functions) is mixed in
+   with real changes. **Fixed in round 4 (strings and runtime function names).**
+3. Stripped binaries only have `FUN_…` names, so findings cannot be matched to the
+   source. **Open.** The `--git` revision input could link them; see below.
+4. Decompiled code showed a blank line after every line (CRLF doubled).
+   **Fixed** (964f00d, compares on LF).
+
+### Round 2 (2026-11-13): zstd 1.5.6 → 1.5.7, PE (`zstd.exe`, `libzstd.dll`, MinGW GCC 13.2 → 14.2)
+
+Ground truth: 530 commits, 166 files; the CLI (`programs/zstdcli.c`, `benchzstd.c`,
+`fileio.c`, `dibio.c`) and the library changed.
+
+- Bytes (1 s): both files modified, one big region each, which is what a recompile gives.
+- Hit: the version (`1.5.7`, `v1.5.7`, and `1.2.11` → the bundled zlib banner gone),
+  new CLI text (`-D dictionary … Benchmark using dictionary`, `Compressing with %u
+  worker threads`, `Invalid Compression Level Range`, LDM hashLog hints), removed
+  benchmark strings.
+- Noise (before round 4): the DWARF producer `GNU C99 13.2.0` vs `14.2.0` and the
+  `GCC: (Rev…)` idents in the string lists, plus ~150 symbol-table strings
+  (`__mingw_*`, `_IMAGE_NT_HEADERS64`) that moved with the MinGW headers.
+- Miss: nothing about speed (small-block compression, `--patch-from`), which has no
+  string trace; ghidriff did list the functions (15 min for both files).
+
+### Round 3 (2026-11-13): fd 10.4.1 → 10.4.2, ELF (Rust, stripped)
+
+Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
+`--ignore-contain`), the version bump, changelog.
+
+- Bytes (2 s): same size, one region. Before round 4 the report listed 6 added and 6
+  removed strings, each several kilobytes: Rust packs its literals without NULs.
+  Round 4 (previous session, `feature/binary-packed-excerpts`) shortens them to the
+  differences, and the version `10.4.1` → `10.4.2` is now readable.
+- ghidriff (436 s): 43 modified, 4 added, 4 removed, all `FUN_…`. **Hit** on the
+  version, **miss** on naming the `walk.rs` change (stripped; finding 3), and the
+  other functions are most likely layout churn from the rebuild: **noise** that cannot
+  be told apart without symbols.
+
+### Round 4 (2026-11-14): finding 2, labelling toolchain churn
+
+- Compiler identification strings (`GNU C99 13.2.0 …`, `GCC: (Rev…) 13.2.0`,
+  `clang version`, `rustc …`) are removed from the string lists and reported in one
+  line, "Toolchain changed: GNU C99: 13.2.0 -> 14.2.0". Re-run on the zstd pair:
+  the report now carries `GCC: (Rev5…) 13.2.0 -> (Rev2…) 14.2.0, (Rev3…) 14.2.0;
+  GNU C99: 13.2.0 -> 14.2.0`, and 2 compiler strings fewer on each side.
+- Functions of the C runtime and startup code (`__mingw_*`, `_pei386_*`, `_initterm`,
+  `QueryPerformance*`, `__p_*`, …) get "(likely toolchain)" in the Engines column
+  and `"toolchain": true` in the JSON. They are labelled, never hidden.
+- Tests: `tests/test_binary_toolchain.py` (6) plus the existing suite, 284 in all.
+- Not done: Rust crate and Go module version changes, the Go build revision
+  (draft tests are in `wt/manish-s13`, uncommitted), and linking `FUN_…` to commits
+  with `--git` (finding 3).
