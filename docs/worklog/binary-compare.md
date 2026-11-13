@@ -739,7 +739,7 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
   `clang version`, `rustc …`) are removed from the string lists and reported in one
   line, "Toolchain changed: GNU C99: 13.2.0 -> 14.2.0". Re-run on the zstd pair:
   the report now carries `GCC: (Rev5…) 13.2.0 -> (Rev2…) 14.2.0, (Rev3…) 14.2.0;
-  GNU C99: 13.2.0 -> 14.2.0`, and 2 compiler strings fewer on each side.
+  GNU C99: 13.2.0 -> 14.2.0`, and those strings are gone from the lists.
 - Functions of the C runtime and startup code (`__mingw_*`, `_pei386_*`, `_initterm`,
   `QueryPerformance*`, `__p_*`, …) get "(likely toolchain)" in the Engines column
   and `"toolchain": true` in the JSON. They are labelled, never hidden.
