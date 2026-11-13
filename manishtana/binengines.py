@@ -553,11 +553,22 @@ def _pseudocode(export):
     return code
 
 
+_CR = re.compile(r"\r\n?")
+
+
+def _lf(text):
+    """Line endings as LF. ghidriff on Windows returns decompiled code with CRLF;
+    the report is written in text mode, which turns CR LF into CR CR LF and shows
+    a blank line after every line. Doing it here also means a CRLF side against an
+    LF side is not read as a code change."""
+    return _CR.sub("\n", text or "")
+
+
 def _unified(name_a, name_b, text_a, text_b):
     if text_a is None and text_b is None:
         return None
-    lines_a = (text_a or "").splitlines(True)
-    lines_b = (text_b or "").splitlines(True)
+    lines_a = _lf(text_a).splitlines(True)
+    lines_b = _lf(text_b).splitlines(True)
     diff = "".join(difflib.unified_diff(
         lines_a, lines_b,
         "a/" + name_a if name_a else "/dev/null",
