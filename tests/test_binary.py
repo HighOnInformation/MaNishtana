@@ -1671,5 +1671,55 @@ class PackedStringExcerpts(unittest.TestCase):
         summary = self._pair(b"version 1.7.0 of the tool", b"version 1.7.1 of the tool")
         self.assertEqual(summary.strings_added, ["version 1.7.1 of the tool"])
 
+class StringRanking(unittest.TestCase):
+    """Only 20 strings are listed, and they came out alphabetically, so symbol
+    names and instruction bytes that happen to be ASCII (zstd 1.5.5 -> 1.5.6: 293
+    strings added, the first 20 all noise, the real help-text change further
+    down) crowded out the sentences and versions a reviewer wants. Listing order
+    now puts sentence-like strings and versions first, instruction-byte
+    lookalikes last. The totals and the set of strings are unchanged."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _pair(self, old, new):
+        paths = []
+        for name, body in (("a", old), ("b", new)):
+            path = os.path.join(self.work, name)
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" + body + b"\x00")
+            paths.append(path)
+        return summarize(*paths)
+
+    def test_sentences_come_before_symbols_and_code_bytes(self):
+        noise = b"\x00".join(b"(L9l$%02d t1L" % i for i in range(30))
+        symbols = b"\x00".join(b"__sym_name_%02d" % i for i in range(30))
+        text = b"\x00--no-mmap-dict   Memory-map dictionary file"
+        summary = self._pair(b"", noise + b"\x00" + symbols + text)
+        self.assertEqual(summary.strings_added[0],
+                         "--no-mmap-dict   Memory-map dictionary file")
+        self.assertEqual(summary.strings_added_total, 61)
+        self.assertEqual(len(summary.strings_added), 20)
+
+    def test_code_byte_lookalikes_last(self):
+        summary = self._pair(b"", b"H[^_]A\\A]A^A_H\x00plain words in a sentence\x00"
+                                  b"ZZZZZZZZZZZZZZZZ\x00__imp_Symbol")
+        self.assertEqual(summary.strings_added[0], "plain words in a sentence")
+        self.assertEqual(summary.strings_added[1], "__imp_Symbol")
+        self.assertEqual(set(summary.strings_added[2:]),
+                         set(["H[^_]A\\A]A^A_H", "ZZZZZZZZZZZZZZZZ"]))
+
+    def test_short_version_ranks_with_sentences(self):
+        junk = b"\x00".join(b"(L9l$%02d t1L" % i for i in range(30))
+        summary = self._pair(b"\x001.7\x00" + junk, b"\x001.7.1\x00" + junk)
+        self.assertEqual(summary.strings_added, ["1.7.1"])
+
+    def test_order_is_deterministic_inside_a_class(self):
+        body = b"\x00".join(b"sentence number %02d here" % i for i in reversed(range(25)))
+        summary = self._pair(b"", body)
+        self.assertEqual(summary.strings_added, sorted(summary.strings_added))
+
+
 if __name__ == "__main__":
     unittest.main()

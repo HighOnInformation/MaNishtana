@@ -130,8 +130,8 @@ def summarize(path_a, path_b, ignore_strings=None):
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
-    added, removed = _excerpt_pairs(sorted(strings_b - strings_a),
-                                    sorted(strings_a - strings_b))
+    added, removed = _excerpt_pairs(_ranked(strings_b - strings_a),
+                                    _ranked(strings_a - strings_b))
 
     return BinarySummary(
         format=fmt,
@@ -551,6 +551,30 @@ def _exact_code_ranges(buf, fmt):
             sections = []
         return sections or _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum)
     return []
+
+
+def _ranked(strings):
+    """Sort strings so the ones a reviewer reads come first.
+
+    Only a few are listed, and alphabetical order put symbol-table entries and
+    instruction bytes that happen to be ASCII ahead of the sentences. Classes:
+    0 a version, an escape, or a sentence-like string (a space between letters);
+    1 anything else; 2 a lookalike of instruction bytes or padding (under half
+    letters, or at most three distinct characters). Inside a class: alphabetical,
+    so the order is stable. Only the order changes, never which strings exist.
+    """
+    return sorted(strings, key=lambda text: (_string_class(text), text))
+
+
+def _string_class(text):
+    letters = sum(1 for char in text if char.isalpha())
+    if _VERSION_RE.match(text.encode("ascii", "replace")) or text.startswith("\\x1b["):
+        return 0
+    if len(set(text)) <= 3 or letters * 2 < len(text):
+        return 2
+    if " " in text.strip() and letters * 10 >= len(text) * 6:
+        return 0
+    return 1
 
 
 def _excerpt_pairs(added, removed):
