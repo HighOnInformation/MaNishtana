@@ -571,6 +571,8 @@ def _binary_facts(summary):
         if total > len(items):
             runs.append((", …", False))
         facts.append(runs)
+    if getattr(summary, "toolchain", None):
+        facts.append([("Toolchain changed: %s" % "; ".join(summary.toolchain), False)])
     return facts
 
 
@@ -631,11 +633,26 @@ def _function_rows(found, limit):
             engines = ", ".join("%s: %s" % item for item in sorted(change.views.items()))
         else:
             engines = ", ".join(sorted(change.views))
+        if _is_toolchain_name(change.name_a or change.name_b):
+            engines += " (likely toolchain)"
         rows[0 if is_disputed else 1].append(
             (name, _address(change), change.status, similarity, engines))
     return _Rows(rows[0], rows[1], len(disputed), len(agreed),
                  max(0, len(disputed) - limit),
                  max(0, len(found.changes) - limit))
+
+
+# Startup and C-runtime functions that a new compiler or MinGW version swaps in and
+# out. They are labelled, never hidden: a reviewer decides.
+_TOOLCHAIN_NAME_RE = re.compile(
+    r"^(__mingw|_pei386|__p_|_fpreset$|_initterm|_setargv|__set_app_type|__main$|__do_global|"
+    r"__security_init_cookie|_gnu_exception_handler|_?_?tmainCRTStartup|mainCRTStartup|"
+    r"QueryPerformance|GetSystemTimeAsFileTime|_start$|_init$|_fini$|"
+    r"(de)?register_tm_clones$|frame_dummy$|__libc_csu_|__cxa_|__gmon_start__)")
+
+
+def _is_toolchain_name(name):
+    return bool(name) and bool(_TOOLCHAIN_NAME_RE.match(name))
 
 
 _Rows = collections.namedtuple(
@@ -779,6 +796,7 @@ def _functions_json(found):
                 "pseudo_diff": change.pseudo_diff,
                 "address_a": getattr(change, "address_a", None),
                 "address_b": getattr(change, "address_b", None),
+                "toolchain": _is_toolchain_name(change.name_a or change.name_b),
             }
             for change in found.changes
         ],

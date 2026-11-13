@@ -38,9 +38,55 @@ import struct
 BinarySummary = collections.namedtuple(
     "BinarySummary",
     "format size_a size_b sha_a sha_b regions regions_total strings_added "
-    "strings_removed strings_added_total strings_removed_total code_regions",
-    defaults=(None,),
+    "strings_removed strings_added_total strings_removed_total code_regions toolchain",
+    defaults=(None, None),
 )
+
+# Round 1 finding 2: the compiler or runtime that built a binary leaves its name in
+# it ("GNU C99 13.2.0 ...", "GCC: (Rev2, ...) 13.2.0", "rustc 1.82.0 ..."). A new one
+# is not a source change, so these strings are taken out of the string lists and
+# reported apart, one line per tool, so GCC 13 -> 14 is a single labelled change.
+_TOOLCHAIN_RES = (
+    (None, re.compile(r"^'?(GNU C\+\+\d*|GNU C\d*) (\d+\.\d+(?:\.\d+)?)")),
+    ("GCC", re.compile(r"^GCC: (\(.*?\) ?\d+\.\d+(?:\.\d+)?)")),
+    ("clang", re.compile(r"\bclang version (\d+\.\d+(?:\.\d+)?)")),
+    ("rustc", re.compile(r"\brustc (\d+\.\d+(?:\.\d+)?)")),
+)
+
+
+def _toolchain_of(text):
+    for key, pattern in _TOOLCHAIN_RES:
+        found = pattern.search(text)
+        if found:
+            if key is None:  # the dialect is part of the compiler's own name
+                return found.group(1), found.group(2)
+            return key, found.group(1)
+    return None
+
+
+def _toolchain_changes(tool_a, tool_b):
+    """Lines like 'GNU C99: 13.2.0 -> 14.2.0' for the tools whose version changed."""
+    def by_key(strings):
+        out = {}
+        for text in strings:
+            key, value = _toolchain_of(text)
+            out.setdefault(key, set()).add(value)
+        return out
+    old, new = by_key(tool_a), by_key(tool_b)
+    lines = []
+    for key in sorted(set(old) | set(new)):
+        before, after = old.get(key, set()), new.get(key, set())
+        if before == after:
+            continue
+        if before and after:
+            lines.append("%s: %s -> %s" % (key, ", ".join(sorted(before)),
+                                           ", ".join(sorted(after))))
+        elif after:
+            lines.append("%s: added %s" % (key, ", ".join(sorted(after))))
+        else:
+            lines.append("%s: removed %s" % (key, ", ".join(sorted(before))))
+    return lines
+
 
 _BLOCK = 4096
 _MAX_REGIONS = 5
@@ -130,6 +176,9 @@ def summarize(path_a, path_b, ignore_strings=None):
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
+    tool_a = {text for text in strings_a if _toolchain_of(text)}
+    tool_b = {text for text in strings_b if _toolchain_of(text)}
+    strings_a, strings_b = strings_a - tool_a, strings_b - tool_b
     added, removed = _excerpt_pairs(_ranked(strings_b - strings_a),
                                     _ranked(strings_a - strings_b))
 
@@ -146,6 +195,7 @@ def summarize(path_a, path_b, ignore_strings=None):
         strings_added_total=len(added),
         strings_removed_total=len(removed),
         code_regions=code_regions,
+        toolchain=_toolchain_changes(tool_a, tool_b),
     )
 
 
