@@ -1617,5 +1617,59 @@ class ShortStrings(unittest.TestCase):
         self.assertEqual(summary.strings_added, ["version 1.7.1"])
         self.assertEqual(summary.strings_removed, ["version 1.7.0"])
 
+class PackedStringExcerpts(unittest.TestCase):
+    """Rust and Go store string literals back to back with no NUL between them, so
+    one printable "string" can be thousands of characters of help text. A version
+    bump inside it listed the whole blob twice, once added and once removed (fd
+    10.4.1 -> 10.4.2: 5,092 characters each way). A long added string that is a
+    near copy of a long removed one is shown as excerpts around the differences."""
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _pair(self, old, new):
+        paths = []
+        for name, body in (("a", old), ("b", new)):
+            path = os.path.join(self.work, name)
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" + body + b"\x00")
+            paths.append(path)
+        return summarize(*paths)
+
+    def test_one_change_in_a_long_blob_is_an_excerpt(self):
+        head = b"".join(b"help text number %03d. " % i for i in range(40))
+        tail = b"".join(b"more words number %03d. " % i for i in range(40))
+        summary = self._pair(head + b"fd 10.4.1 " + tail, head + b"fd 10.4.2 " + tail)
+        self.assertEqual(len(summary.strings_added), 1)
+        self.assertEqual(len(summary.strings_removed), 1)
+        added, removed = summary.strings_added[0], summary.strings_removed[0]
+        self.assertIn("10.4.2", added)
+        self.assertIn("10.4.1", removed)
+        self.assertLess(len(added), 120)
+        self.assertTrue(added.startswith("…") and added.endswith("…"))
+        self.assertEqual(summary.strings_added_total, 1)
+
+    def test_two_separate_changes_give_two_excerpts(self):
+        mid = b"".join(b"filler sentence %03d. " % i for i in range(30))
+        summary = self._pair(b"alpha OLD1 " + mid + b" omega OLD2 end of the strings",
+                             b"alpha NEW1 " + mid + b" omega NEW2 end of the strings")
+        added = summary.strings_added[0]
+        self.assertIn("NEW1", added)
+        self.assertIn("NEW2", added)
+        self.assertIn(" … ", added)
+        self.assertLess(len(added), 200)
+
+    def test_unrelated_long_strings_are_kept_whole(self):
+        old = b"".join(b"first text %03d. " % i for i in range(20))
+        new = b"".join(b"other word %03d! " % (999 - i) for i in range(20))
+        summary = self._pair(old, new)
+        self.assertEqual(summary.strings_added, [new.decode("ascii")])
+        self.assertEqual(summary.strings_removed, [old.decode("ascii")])
+
+    def test_short_strings_are_never_excerpted(self):
+        summary = self._pair(b"version 1.7.0 of the tool", b"version 1.7.1 of the tool")
+        self.assertEqual(summary.strings_added, ["version 1.7.1 of the tool"])
+
 if __name__ == "__main__":
     unittest.main()

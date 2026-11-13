@@ -30,6 +30,7 @@ library only, as everywhere in this package.
 """
 
 import collections
+import difflib
 import hashlib
 import re
 import struct
@@ -55,6 +56,13 @@ _STRING_RE = re.compile(rb"[\x20-\x7e]{8,}")
 _SHORT_RE = re.compile(rb"(?<![\x01-\xff])(\x1b?[\x20-\x7e]{3,7})\x00")
 _VERSION_RE = re.compile(rb"v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.]+)?\Z")
 _ESCAPE_RE = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]\Z")
+# Long near-copies (see _excerpt_pairs): strings over _EXCERPT_OVER characters
+# whose similarity is at least _EXCERPT_RATIO are cut to _EXCERPT_CONTEXT
+# characters each side of every difference, each piece at most _EXCERPT_PIECE.
+_EXCERPT_OVER = 120
+_EXCERPT_RATIO = 0.6
+_EXCERPT_CONTEXT = 24
+_EXCERPT_PIECE = 160
 
 # PE debug directory entry types whose payload is per-link noise.
 _DEBUG_CODEVIEW = 2
@@ -122,8 +130,8 @@ def summarize(path_a, path_b, ignore_strings=None):
 
     strings_a = _strings(data_a)
     strings_b = _strings(data_b)
-    added = sorted(strings_b - strings_a)
-    removed = sorted(strings_a - strings_b)
+    added, removed = _excerpt_pairs(sorted(strings_b - strings_a),
+                                    sorted(strings_a - strings_b))
 
     return BinarySummary(
         format=fmt,
@@ -543,6 +551,73 @@ def _exact_code_ranges(buf, fmt):
             sections = []
         return sections or _elf_exec_segments(buf, end, wide, phoff, phentsize, phnum)
     return []
+
+
+def _excerpt_pairs(added, removed):
+    """Shorten long near-copies to the parts that differ.
+
+    Rust and Go store string literals back to back with no NUL between them, so
+    one printable run can be kilobytes of help text, and a version bump inside it
+    listed the whole run twice (added and removed). A long added string is paired
+    with the long removed string most like it; when they are mostly the same, each
+    is replaced by excerpts around the differences. The lists keep their length
+    and order, so the totals stay true; unpaired strings are left whole.
+    """
+    long_added = [i for i, text in enumerate(added) if len(text) > _EXCERPT_OVER]
+    long_removed = [i for i, text in enumerate(removed) if len(text) > _EXCERPT_OVER]
+    if not long_added or not long_removed:
+        return added, removed
+    candidates = []
+    for i in long_added:
+        for j in long_removed:
+            matcher = difflib.SequenceMatcher(None, removed[j], added[i], autojunk=False)
+            if matcher.real_quick_ratio() < _EXCERPT_RATIO \
+                    or matcher.quick_ratio() < _EXCERPT_RATIO:
+                continue
+            ratio = matcher.ratio()
+            if ratio >= _EXCERPT_RATIO:
+                candidates.append((-ratio, i, j, matcher))
+    candidates.sort(key=lambda c: c[:3])
+    added, removed = list(added), list(removed)
+    used_a, used_r = set(), set()
+    for _, i, j, matcher in candidates:
+        if i in used_a or j in used_r:
+            continue
+        used_a.add(i)
+        used_r.add(j)
+        old_parts, new_parts = [], []
+        for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            old_parts.append(_excerpt(removed[j], a1, a2))
+            new_parts.append(_excerpt(added[i], b1, b2))
+        removed[j] = _join_excerpts(old_parts)
+        added[i] = _join_excerpts(new_parts)
+    return added, removed
+
+
+def _excerpt(text, start, stop):
+    return (max(0, start - _EXCERPT_CONTEXT), min(len(text), stop + _EXCERPT_CONTEXT), text)
+
+
+def _join_excerpts(parts):
+    """Merge overlapping windows; "…" marks text left out at either end or between."""
+    merged = []
+    for start, stop, text in parts:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(stop, merged[-1][1]), text)
+        else:
+            merged.append((start, stop, text))
+    pieces = []
+    for start, stop, text in merged:
+        piece = text[start:stop]
+        if len(piece) > _EXCERPT_PIECE:      # a long insertion: its two ends only
+            half = _EXCERPT_PIECE // 2
+            piece = piece[:half] + "…" + piece[-half:]
+        pieces.append(piece)
+    first, last = merged[0], merged[-1]
+    return (("…" if first[0] > 0 else "") + " … ".join(pieces)
+            + ("…" if last[1] < len(last[2]) else ""))
 
 
 def _strings(data):
