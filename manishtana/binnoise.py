@@ -973,8 +973,11 @@ def _removed_chunk(text, other_text, own_text):
         start = other_text.rfind("\x00", 0, at) + 1
         stop = other_text.find("\x00", at)
         literal = other_text[start:len(other_text) if stop < 0 else stop]
-        if len(literal) > _MAX_LITERAL:
-            return None
+        if len(literal) > _MAX_LITERAL:      # too big to scan: try a later literal
+            if stop < 0:
+                return None
+            at = other_text.find(text[:_WINDOW], stop)
+            continue
         if len(literal) > len(text):
             k = 0
             while k < len(text) and text[k] == literal[k]:

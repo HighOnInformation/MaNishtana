@@ -428,6 +428,14 @@ class RelayoutFalseNegatives(unittest.TestCase):
         text = "start of the literal " + base[:-10] + "and the end"
         self.assertIsNone(_removed_chunk(text, other, text))
 
+    def test_a_huge_literal_does_not_hide_a_later_matching_literal(self):
+        # the first literal sharing the prefix is too big to scan; a later one is the match
+        from manishtana.binnoise import _MAX_LITERAL, _removed_chunk
+        huge = "start of the literal " + "word " * (_MAX_LITERAL // 5 + 100)
+        real = "start of the literal fully removed words and the end"
+        text = "start of the literal and the end"
+        self.assertEqual(_removed_chunk(text, huge + "\x00" + real, text), "fully removed words")
+
     def test_a_huge_removed_chunk_is_reported_truncated(self):
         from manishtana.binnoise import _MAX_CHUNK, _removed_chunk
         chunk = "unique words in this long deleted piece " * 40
