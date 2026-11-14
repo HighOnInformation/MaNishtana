@@ -578,6 +578,9 @@ def _binary_facts(summary, links=None, commits=None):
         if total > len(items):
             runs.append((", …", False))
         facts.append(runs)
+    if getattr(summary, "layout_noise", 0):
+        facts.append([("%d strings differ only in literal layout or look like code bytes "
+                       "(not listed)" % summary.layout_noise, False)])
     if getattr(summary, "toolchain", None):
         facts.append([("Toolchain changed: %s" % "; ".join(summary.toolchain), False)])
     if getattr(summary, "dependencies", None):

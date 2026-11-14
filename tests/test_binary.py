@@ -1699,7 +1699,9 @@ class StringRanking(unittest.TestCase):
         summary = self._pair(b"", noise + b"\x00" + symbols + text)
         self.assertEqual(summary.strings_added[0],
                          "--no-mmap-dict   Memory-map dictionary file")
-        self.assertEqual(summary.strings_added_total, 61)
+        # the 30 code-byte lookalikes are counted apart, not listed
+        self.assertEqual(summary.strings_added_total, 31)
+        self.assertEqual(summary.layout_noise, 30)
         self.assertEqual(len(summary.strings_added), 20)
 
     def test_code_byte_lookalikes_last(self):

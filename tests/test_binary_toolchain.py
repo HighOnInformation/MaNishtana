@@ -149,3 +149,93 @@ class RebuildHashNoise(unittest.TestCase):
         s = self._sum(old, new)
         self.assertEqual(s.strings_added_total, 1)
         self.assertIn("bstr-1.11.0", s.strings_added[0])
+
+
+class RebuildLayoutNoise(unittest.TestCase):
+    """ripgrep 14.1.1 alpine 3.21 -> 3.22: the same literals, glued to compiler-library
+    and registry source paths, are laid out in a different order. Paths inside the
+    compiler library or a cargo registry are toolchain churn; the text around them is
+    compared piece by piece."""
+
+    setUp = ToolchainStrings.setUp
+    _sum = ToolchainStrings._sum
+
+    REG = b"/home/buildozer/.cargo/registry/src/index.crates.io-6f17d22bba15001f/"
+    STD = b"/rustc/f6e511eec7342f59a25f7c0534f1dbea00d01b14/library/"
+
+    def test_same_literals_laid_out_differently_are_not_a_change(self):
+        old = (b"\x00" + self.REG + b"regex-syntax-0.8.4/src/hir/visitor.rsUnicode not allowed here"
+               + self.STD + b"std/src/thread/mod.rsfailed to spawn thread"
+               + b"crates/searcher/src/lines.rsassertion failed: m.0 <= m.1: \x00")
+        new = (b"\x00" + b"crates/searcher/src/lines.rsassertion failed: m.0 <= m.1: "
+               + self.STD + b"core/src/cell/once.rsUnicode not allowed here"
+               + self.REG + b"bstr-1.10.0/src/impls.rsfailed to spawn thread\x00")
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added_total, s.strings_removed_total), (0, 0))
+
+    def test_a_compiler_library_path_alone_is_not_a_changed_string(self):
+        old = b"\x00" + self.STD + b"core/src/iter/traits/iterator.rsmid > len\x00"
+        new = b"\x00" + self.STD + b"core/src/slice/mod.rsmid > len\x00"
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added_total, s.strings_removed_total), (0, 0))
+
+    def test_a_new_message_next_to_library_paths_is_still_reported(self):
+        old = b"\x00" + self.STD + b"std/src/thread/mod.rsfailed to spawn thread\x00"
+        new = (b"\x00" + self.STD + b"std/src/thread/mod.rsfailed to spawn thread"
+               + self.REG + b"bstr-1.10.0/src/impls.rsa brand new error message\x00")
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+        self.assertIn("a brand new error message", s.strings_added[0])
+
+    def test_the_projects_own_source_path_is_still_a_string(self):
+        old = b"\x00crates/core/flags/doc/help.rsone message\x00"
+        new = b"\x00crates/core/flags/doc/help.rsone message crates/core/flags/new_file.rs\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+        self.assertIn("crates/core/flags/new_file.rs", s.strings_added[0])
+
+
+class RebuildLiteralRelayout(unittest.TestCase):
+    """The same literals re-glued next to different neighbours (real strings from the
+    ripgrep 14.1.1 alpine 3.21 / 3.22 rebuild), compiled-code bytes that look like text,
+    and the library path with and without its "library/" prefix."""
+
+    setUp = ToolchainStrings.setUp
+    _sum = ToolchainStrings._sum
+
+    def test_regluing_and_library_prefix_change_nothing(self):
+        old = (b"\x00mid > lenfile system loop foundIO error for operation on : File system loop found:  points to an ancestor"
+               b"std/src/path.rs.extension cannot contain path separators: stdinstd/src/sync/once.rslock count overflow in reentrant mutex\x00")
+        new = (b"\x00.extension cannot contain path separators: stdinlibrary/std/src/sync/poison/once.rslock count overflow in reentrant mutex"
+               b"library/std/src/thread/current.rsmid > len\x00"
+               b"\x00file system loop foundIO error for operation on : File system loop found:  points to an ancestor\x00")
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added, s.strings_removed), ([], []))
+        self.assertGreater(s.layout_noise, 0)
+
+    def test_one_new_word_in_a_reglued_literal_is_reported(self):
+        old = b"\x00failed to spawn thread, a message that stays\x00"
+        new = b"\x00a message that staysfailed to spawn thread, and ripgrep now prints a brand new warning\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+        self.assertIn("brand new warning", s.strings_added[0])
+
+    def test_compiled_code_bytes_are_counted_not_listed(self):
+        old = b"\x00H9D$ u{M\x00L9t$Hv0I\x00"
+        new = b"\x00tHL;t$Hu\x00H;l$`u!H\x00"
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added, s.strings_removed), ([], []))
+        self.assertEqual(s.layout_noise, 4)
+
+    def test_a_short_format_string_is_not_taken_for_code(self):
+        old = b"\x00nothing here at all\x00"
+        new = b"\x00nothing here at all\x00%d.%d.%d-%s\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+
+    def test_report_mentions_the_count(self):
+        summary = BinarySummary("elf", 1, 2, "a", "b", [(0, 1)], 1, [], [], 0, 0, layout_noise=7)
+        comparison = Comparison(real={"rg": ("M", ["rg"])}, noise=set(), skipped=set(),
+                               sections={}, binaries={"rg"})
+        text = build_report("A", "B", comparison, {}, None, binary={"rg": summary})
+        self.assertIn("7 strings differ only in literal layout or look like code bytes", text)

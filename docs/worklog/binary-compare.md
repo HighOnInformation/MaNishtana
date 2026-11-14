@@ -810,3 +810,41 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
   superseded by commit 725e150 (same tests exist in `tests/test_binary_deps.py`);
   nothing to copy.
 - **Tests:** 336 pass.
+
+### Round 7 (2026-11-14): rebuild noise, compiler-library paths and literal layout
+
+- **Problem (from round 6):** the ripgrep 14.1.1 alpine 3.21 -> 3.22 rebuild still showed
+  193 strings added and 195 removed. Looking at them: Rust packs literals together with
+  their source paths, and a rebuild glues them next to different neighbours; the compiler
+  library path appears as `library/std/src/...` in one build and `std/src/...` in the
+  other; and compiled code that happens to be ASCII (`H9D$ u{M`) differs on every rebuild.
+- **Fix (`binnoise.py`):** (1) packed literals are split at source paths; paths inside the
+  compiler library, a cargo registry, `/rust/deps/` or `/usr/src/rustc-*` are dropped, the
+  project's own `crates/...rs` and `src/...rs` stay as pieces. (2) A string that only the
+  other side lacks because of its neighbours is dropped: every letter and digit of it is
+  covered by an 8-character window that exists on the other side (only punctuation, or a
+  short letters-only literal glued to one end of a long string, may be unseen). (3) Short
+  strings (up to 12 characters) with no 3-letter word, no `%` and no version or escape shape
+  are treated as code bytes. Dropped strings are counted, not hidden: the report says
+  "N strings differ only in literal layout or look like code bytes (not listed)", and
+  `BinarySummary.layout_noise` carries the count.
+- **Results (bytes, `--no-llm`):**
+  - ripgrep rebuild: strings 193/195 -> 63/58, with 303 counted as layout or code bytes.
+    **Still not noise only.** What is left is mostly real library difference: the two builds
+    use different rustc (1.82.0 vs 1.86.0; std panic messages differ) plus about 30 code-byte
+    lookalikes over 12 characters. So it is not a same-toolchain rebuild; a true same-toolchain
+    control pair is still wanted.
+  - same binary twice: no differences (0.4 s). rebuild pair 0.8 s.
+- **Regression (older pairs, bytes only, ghidriff skipped: 7-15 min each):**
+  - zstd 1.5.6 -> 1.5.7 (PE): zstd.exe strings 281/256 -> 130/127, libzstd.dll 202/152 -> 84/48.
+    The version strings `1.5.6`, `1.5.7`, `v1.5.6`, `v1.5.7` and `1.2.11` are all kept, and the
+    GCC change is still one toolchain line. 0.7 s.
+  - fd 10.4.1 -> 10.4.2 (Rust ELF): 6/6 -> 3/2; the version string `10.4.2` is kept. 1.2 s.
+  - jq 1.7 -> 1.7.1: the round-1 binaries are not kept on this PC, so not re-run.
+- **Known limit:** a changed word of up to 7 letters at the very end of a long literal, and a
+  one-character deletion inside a string, look like a join and are dropped (counted).
+  Dropped sentence-like strings in the PE runs were symbol or path names that exist on both
+  sides.
+- **Tests:** 345 pass (336 before; new ones in `tests/test_binary_toolchain.py`, one existing ranking
+  test updated because code lookalikes are now counted). No independent review run.
+  Raw reports in `Documents\manish-binary-rounds\s16\`.

@@ -38,8 +38,9 @@ import struct
 BinarySummary = collections.namedtuple(
     "BinarySummary",
     "format size_a size_b sha_a sha_b regions regions_total strings_added "
-    "strings_removed strings_added_total strings_removed_total code_regions toolchain dependencies revisions",
-    defaults=(None, None, None, None),
+    "strings_removed strings_added_total strings_removed_total code_regions toolchain dependencies revisions "
+    "layout_noise",
+    defaults=(None, None, None, None, 0),
 )
 
 # Round 1 finding 2: the compiler or runtime that built a binary leaves its name in
@@ -250,8 +251,9 @@ def summarize(path_a, path_b, ignore_strings=None):
     tool_a = {text for text in strings_a if _toolchain_of(text)}
     tool_b = {text for text in strings_b if _toolchain_of(text)}
     strings_a, strings_b = strings_a - tool_a, strings_b - tool_b
-    added, removed = _excerpt_pairs(_ranked(strings_b - strings_a),
-                                    _ranked(strings_a - strings_b))
+    new_b, new_a, layout = _drop_layout_noise(strings_b - strings_a, strings_a - strings_b,
+                                              strings_a, strings_b)
+    added, removed = _excerpt_pairs(_ranked(new_b), _ranked(new_a))
 
     return BinarySummary(
         format=fmt,
@@ -269,6 +271,7 @@ def summarize(path_a, path_b, ignore_strings=None):
         toolchain=_toolchain_changes(tool_a, tool_b) + _rustc_commit_change(data_a, data_b),
         dependencies=_dependency_changes(data_a, data_b),
         revisions=_build_revisions(data_a, data_b),
+        layout_noise=layout,
     )
 
 
@@ -778,13 +781,118 @@ def _mask_build_hashes(data):
         lambda m: (m.group(1) + b"<hash>") if m.group(1) else (m.group(2) + b"<hash>"), data)
 
 
+# Source paths that Rust packs between literals. A path inside the compiler library or
+# a cargo registry is toolchain churn: a rebuild with another rustc or registry moves
+# or renames them (the version of a dependency is reported on its own line). The
+# project's own paths (crates/, src/) stay as pieces. Lazy up to the first ".rs",
+# because the next literal is glued right after it.
+_TOOLCHAIN_PATH_RE = (
+    r"(?:(?:/[\w<>.+-]+)*?/registry/src/[\w<>.+-]+/|/rustc/<hash>/|/rust/deps/|"
+    r"/usr/src/rustc-[\d.]+/|(?:library/)?(?=(?:core|std|alloc)/src/))[\w<>.+/-]*?\.rs")
+_OWN_PATH_RE = r"(?:crates/|(?<![\w/.+-])src/)[\w.+-]+(?:/[\w.+-]+)*?\.rs"
+_PATH_SPLIT_RE = re.compile("(%s)|(%s)" % (_TOOLCHAIN_PATH_RE, _OWN_PATH_RE))
+_PIECE_MIN = 8
+
+
+def _pieces(text):
+    """Split a packed literal at its source paths: drop toolchain paths, keep the rest.
+
+    Literals are glued together, and a rebuild lays them out in another order, so a
+    whole string differs while every piece is the same. Text without a path is
+    returned as is.
+    """
+    parts = _PATH_SPLIT_RE.split(text)
+    if len(parts) == 1:
+        return [text]
+    pieces = []
+    for at in range(0, len(parts), 3):
+        pieces.append(parts[at])
+        if at + 2 < len(parts) and parts[at + 2]:
+            pieces.append(parts[at + 2])
+    return [p.strip() for p in pieces if p and len(p.strip()) >= _PIECE_MIN]
+
+
 def _strings(data):
     if data is None:
         return set()
     data = _mask_build_hashes(data)
-    found = set(match.decode("ascii") for match in _STRING_RE.findall(data))
+    found = set()
+    for match in _STRING_RE.findall(data):
+        found.update(_pieces(match.decode("ascii")))
     for match in _SHORT_RE.finditer(data):
         text = match.group(1)
         if _ESCAPE_RE.match(text) or _VERSION_RE.match(text):
             found.add(text.decode("ascii").replace("\x1b", "\\x1b"))
     return found
+
+
+# A rebuild lays the packed literals out again, so a string can differ only because of
+# its neighbours, and compiled code that happens to be ASCII differs on every rebuild.
+# A string is layout noise if each of its letters and digits is covered by an 8-character
+# window that exists on the other side; only punctuation at a join may be unseen. A
+# replaced or added word or number is not dropped by this (a pure deletion is). Skipped for very large
+# string tables, where the window sets would cost too much memory.
+_WINDOW = 8
+_WINDOW_LIMIT = 6_000_000
+_WORD_RE = re.compile(r"[a-z]{3}|[A-Z][a-z]{2}")
+
+
+def _is_code_like(text):
+    """Short, no 3-letter word, no format mark and not a version: instruction bytes."""
+    return (len(text) <= 12 and "%" not in text and not _WORD_RE.search(text)
+            and not text.startswith("\\x1b[") and not _VERSION_RE.match(text.encode("ascii", "replace")))
+
+
+def _windows(strings):
+    found = set()
+    for text in strings:
+        for at in range(len(text) - _WINDOW + 1):
+            found.add(text[at:at + _WINDOW])
+    return found
+
+
+_EDGE_WORD = 7          # a short literal glued to one end of a seen string, letters only
+_EDGE_REST = 16         # ... and at least this much of the string is seen elsewhere
+
+
+def _is_relaid(text, other_windows):
+    """True if nothing but a join is unseen: every letter or digit is covered by a window
+    that exists on the other side, except at most a short letters-only literal (or
+    punctuation) glued to one end of a long string that is otherwise seen.
+
+    Interior changes, digits (a version bump) and longer runs are new text. Limit: a
+    changed word of up to 7 letters at the very end of a long literal looks like a join.
+    """
+    covered = [False] * len(text)
+    for at in range(len(text) - _WINDOW + 1):
+        if text[at:at + _WINDOW] in other_windows:
+            for i in range(at, at + _WINDOW):
+                covered[i] = True
+    if all(covered):
+        return True
+    seen = [i for i, done in enumerate(covered) if done]
+    if len(seen) < _EDGE_REST:
+        return False
+    first, last = seen[0], seen[-1]
+    for i, (char, done) in enumerate(zip(text, covered)):
+        if done or not char.isalnum():
+            continue
+        edge = i < first or i > last
+        if not edge or char.isdigit():
+            return False
+    return (first <= _EDGE_WORD) and (len(text) - 1 - last <= _EDGE_WORD)
+
+
+def _drop_layout_noise(new_b, new_a, all_a, all_b):
+    """(added, removed, how many were dropped) from the strings only one side has."""
+    dropped = 0
+    code_b = {t for t in new_b if _is_code_like(t)}
+    code_a = {t for t in new_a if _is_code_like(t)}
+    new_b, new_a, dropped = new_b - code_b, new_a - code_a, len(code_b) + len(code_a)
+    if sum(map(len, all_a)) + sum(map(len, all_b)) <= _WINDOW_LIMIT:
+        win_a, win_b = _windows(all_a), _windows(all_b)
+        keep_b = {t for t in new_b if len(t) < _WINDOW or not _is_relaid(t, win_a)}
+        keep_a = {t for t in new_a if len(t) < _WINDOW or not _is_relaid(t, win_b)}
+        dropped += (len(new_b) - len(keep_b)) + (len(new_a) - len(keep_a))
+        new_b, new_a = keep_b, keep_a
+    return new_b, new_a, dropped
