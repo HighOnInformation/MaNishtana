@@ -747,3 +747,8 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
 - Not done: Rust crate and Go module version changes, the Go build revision
   (draft tests are in `wt/manish-s13`, uncommitted), and linking `FUN_…` to commits
   with `--git` (finding 3).
+- Regression re-run of round 3 (fd, ghidriff) on this branch: 615 s (436 s before; the
+  PC was busy), 45 modified / 4 added / 3 removed (43/4/4 before). The function counts
+  moved by a few between runs of the same pair, so ghidriff's matching of a stripped
+  Rust binary is not fully stable. No "likely toolchain" label fires on fd (all
+  `FUN_…`), and the decompiled section has no doubled blank lines. Round 2 bytes: 1 s.
