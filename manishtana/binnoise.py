@@ -945,7 +945,9 @@ def _removed_chunk(text, other_text, own_text):
 
     Such a string is covered by the other side's windows just as a re-glued literal is,
     but nothing moved: text was removed (or, seen from the other side, inserted). A
-    chunk that still exists elsewhere on the string's own side was only moved.
+    moved chunk occurs as often on the string's own side as on the other side; a
+    deleted one occurs less often. Counting, not mere presence, because a short word
+    ("not") almost always exists somewhere else in the build.
     """
     at = other_text.find(text[:_WINDOW])
     for _ in range(_DELETION_TRIES):
@@ -959,10 +961,10 @@ def _removed_chunk(text, other_text, own_text):
             while k < len(text) and text[k] == literal[k]:
                 k += 1
             if literal.endswith(text[k:]):
-                chunk = literal[k:len(literal) - (len(text) - k)]
+                chunk = literal[k:len(literal) - (len(text) - k)].strip()
                 if (_WORD_RE.search(chunk)   # a removed word, not stray code bytes
-                        and chunk.strip() not in own_text):
-                    return chunk.strip()
+                        and own_text.count(chunk) < other_text.count(chunk)):
+                    return chunk
                 return None
         at = other_text.find(text[:_WINDOW], at + 1)
     return None

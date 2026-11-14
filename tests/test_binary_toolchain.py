@@ -314,6 +314,15 @@ class RelayoutFalseNegatives(unittest.TestCase):
         self.assertEqual(len(s.deletions), 1)
         self.assertIn("inserted: sleeping", s.deletions[0])
 
+    def test_a_deleted_common_word_is_reported(self):
+        # "not" still occurs in another literal of the new build ("file not found"), but
+        # the old build had one more "not": it was deleted, not moved
+        old = b"\x00--no-ignore: do not respect ignore files\x00file not found\x00"
+        new = b"\x00--no-ignore: do respect ignore files\x00file not found\x00"
+        s = self._sum(self.F + old, self.F + new)
+        self.assertEqual(len(s.deletions), 1)
+        self.assertIn("removed: not", s.deletions[0])
+
     def test_a_moved_literal_is_layout_not_a_deletion(self):
         # "sleeping dog today" moved to its own literal: nothing was deleted
         old = b"\x00" + self.F + self.LONG + b"\x00"

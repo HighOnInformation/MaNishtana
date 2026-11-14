@@ -387,7 +387,8 @@ like code bytes (not listed)" (JSON: `binary_detail.layout_noise`). What is drop
   version or escape shape. Upper-case names (`NO_COLOR`) and labels (`ERROR:`) are kept.
 
 *Pure deletions and insertions.* A string that equals a literal on the other side with
-one piece cut out (and that piece is not elsewhere in the same build) looks like re-layout
+one piece cut out (and that piece occurs fewer times in this build than in the other;
+as often means it only moved) looks like re-layout
 to the window test, so it is listed apart: "Strings with a pure deletion or insertion, the
 rest unchanged", each shown as `text (removed: piece)` or `text (inserted: piece)`
 (JSON: `binary_detail.deletions`). They are not counted as noise.

@@ -879,3 +879,6 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
   Many labelled deletions in cross-distro pairs are real text differences between libc/std
   versions; the label does not say the change is source-level.
 - No independent review run (self-review only).
+- **Independent review (round 8):** a deleted common word ("do not respect" -> "do respect") was still
+  dropped as noise, because "not" exists elsewhere in the build. The moved-vs-deleted test now compares
+  how often the piece occurs on each side (`_removed_chunk`). 364 tests pass.
