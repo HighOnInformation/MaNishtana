@@ -588,7 +588,7 @@ def _binary_facts(summary, links=None, commits=None):
                           summary.revisions[0][:12], summary.revisions[1][:12]), False)])
     if links is not None and links.strings:
         subjects = dict((item.sha, item.subject) for item in (commits or []))
-        runs = [("Linked to commits: ", False)]
+        runs = [("Candidate commits (possible link, not proof): ", False)]
         for index, (text, shas) in enumerate(sorted(links.strings.items())):
             if index:
                 runs.append(("; ", False))

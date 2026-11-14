@@ -121,7 +121,7 @@ class Rendering(unittest.TestCase):
     def test_markdown_names_the_commit_next_to_the_function_and_string(self):
         md = build_report("v1", "v2", self.comparison, {}, None, **self.kw)
         self.assertIn("| `FUN_00101000` | modified | 0.50 | ghidriff; commit aaaaaaaaa |", md)
-        self.assertIn("Linked to commits: `ignore-contain check skipped` → aaaaaaaaa "
+        self.assertIn("Candidate commits (possible link, not proof): `ignore-contain check skipped` → aaaaaaaaa "
                       "(Skip syscall)", md)
 
     def test_json_carries_the_links(self):
@@ -135,7 +135,7 @@ class Rendering(unittest.TestCase):
         del self.kw["links"]
         md = build_report("v1", "v2", self.comparison, {}, None, **self.kw)
         self.assertIn("| `FUN_00101000` | modified | 0.50 | ghidriff |", md)
-        self.assertNotIn("Linked to commits", md)
+        self.assertNotIn("Candidate commits (possible link, not proof)", md)
 
 
 def _git(repo, *args):
@@ -190,7 +190,7 @@ class RepoPatches(unittest.TestCase):
         self.assertEqual(links, {"hello brand new world": [self.head],
                                  "hello old world": [self.head]})
         with open(out, encoding="utf-8") as handle:
-            self.assertIn("Linked to commits", handle.read())
+            self.assertIn("Candidate commits (possible link, not proof)", handle.read())
 
     def test_link_repo_without_from_is_an_error(self):
         a = os.path.join(self.tmp, "a")

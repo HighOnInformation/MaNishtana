@@ -373,7 +373,7 @@ removed — often the quickest clue to what changed.
 `--link-repo REPO --from REV [--to REV]`, a string added or removed in a binary, and a
 changed function whose decompiled code quotes a string literal (a stripped binary has
 only `FUN_…` names, but its literals survive), is matched against the changed lines of
-each commit in the range, and the report names the commits ("Linked to commits: …", a
+each commit in the range, and the report names the commits ("Candidate commits (possible link, not proof): …", a
 `commit` note in the function table, `binary_links` and `commits` in the JSON). Named
 functions are also matched by name in hunk headers and changed lines. This is
 evidence, not proof: a change that adds no literal stays unlinked, and a literal that
