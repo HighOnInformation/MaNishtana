@@ -788,11 +788,17 @@ def _mask_build_hashes(data):
 # or renames them (the version of a dependency is reported on its own line). The
 # project's own paths (crates/, src/) stay as pieces. Lazy up to the first ".rs",
 # because the next literal is glued right after it.
+# A bare "std/src/" (no "library/" before it) is only toolchain when what follows is a
+# real top-level std/alloc module or file; otherwise "nostd/src/main.rs" would be cut.
+_STD_MODULES = (
+    "alloc|ascii|backtrace|borrow|boxed|bstr|collections|env|error|f32|f64|ffi|fmt|fs|hash|"
+    "io|keyword_docs|lib|macros|net|num|os|panic|panicking|path|personality|pipe|prelude|"
+    "process|random|raw_vec|rc|rt|slice|str|string|sync|sys|sys_common|task|thread|time|vec")
 _TOOLCHAIN_PATH_RE = (
     r"(?:(?:/[\w<>.+-]+)*?/registry/src/[\w<>.+-]+/|/rustc/<hash>/|/rust/deps/|"
     r"/usr/src/rustc-[\d.]+/|(?:/[\w.+-]+)*?/rustlib/(?:[\w.+-]+/)*?library/|"
-    r"library/(?=(?:core|std|alloc)/src/)|(?=(?:std|alloc)/src/))"
-    r"[\w<>.+/-]*?\.rs")
+    r"library/(?=(?:core|std|alloc)/src/)|(?=(?:std|alloc)/src/(?:%s)(?:/|\.rs)))"
+    r"[\w<>.+/-]*?\.rs") % _STD_MODULES
 _OWN_PATH_RE = r"(?:crates/|(?<![\w/.+-])src/)[\w.+-]+(?:/[\w.+-]+)*?\.rs"
 _PATH_SPLIT_RE = re.compile("(%s)|(%s)" % (_TOOLCHAIN_PATH_RE, _OWN_PATH_RE))
 _PIECE_MIN = 8
@@ -937,6 +943,9 @@ def _at_literal_edge(window, other_text, tail):
 
 
 _DELETION_TRIES = 20
+_MAX_LITERAL = 4096          # a longer literal is not scanned for a removed piece
+_MAX_CHUNK = 200             # a longer removed piece is shown cut to this
+_MAX_DELETION_CHECKS = 2000  # strings examined per build; the rest count as layout
 
 
 def _removed_chunk(text, other_text, own_text):
@@ -956,15 +965,22 @@ def _removed_chunk(text, other_text, own_text):
         start = other_text.rfind("\x00", 0, at) + 1
         stop = other_text.find("\x00", at)
         literal = other_text[start:len(other_text) if stop < 0 else stop]
+        if len(literal) > _MAX_LITERAL:
+            return None
         if len(literal) > len(text):
             k = 0
             while k < len(text) and text[k] == literal[k]:
                 k += 1
             if literal.endswith(text[k:]):
                 chunk = literal[k:len(literal) - (len(text) - k)].strip()
+                if len(chunk) > _MAX_CHUNK:
+                    chunk = chunk[:_MAX_CHUNK]
+                    shown = chunk + "…"
+                else:
+                    shown = chunk
                 if (_WORD_RE.search(chunk)   # a removed word, not stray code bytes
                         and own_text.count(chunk) < other_text.count(chunk)):
-                    return chunk
+                    return shown
                 return None
         at = other_text.find(text[:_WINDOW], at + 1)
     return None
@@ -985,13 +1001,17 @@ def _drop_layout_noise(new_b, new_a, all_a, all_b):
         win_a, win_b = _windows(all_a), _windows(all_b)
         text_a, text_b = "\x00".join(all_a), "\x00".join(all_b)
 
+        checks = [0]
+
         def keep(strings, windows, other_text, own_text, verb):
             kept = set()
-            for t in strings:
+            for t in sorted(strings):   # sorted: the budget cuts the same strings every run
                 if len(t) < _WINDOW or not _is_relaid(t, windows, other_text):
                     kept.add(t)
                     continue
-                chunk = _removed_chunk(t, other_text, own_text)
+                checks[0] += 1
+                chunk = (_removed_chunk(t, other_text, own_text)
+                         if checks[0] <= _MAX_DELETION_CHECKS else None)
                 if chunk is not None:
                     deletions.append("%s (%s: %s)" % (t, verb, chunk))
             return kept

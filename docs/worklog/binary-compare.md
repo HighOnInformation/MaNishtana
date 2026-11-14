@@ -882,3 +882,21 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
 - **Independent review (round 8):** a deleted common word ("do not respect" -> "do respect") was still
   dropped as noise, because "not" exists elsewhere in the build. The moved-vs-deleted test now compares
   how often the piece occurs on each side (`_removed_chunk`). 364 tests pass.
+
+### Round 8 (2026-11-14, second pass): small open findings from the round-8 review
+
+- **Fixed (test-first, `tests/test_binary_toolchain.py`):**
+  1. A bare `std/src/` or `alloc/src/` was compiler noise wherever it appeared, so a project path
+     such as `nostd/src/main.rs` was cut at its tail. The bare form now counts only when followed by a
+     real top-level std/alloc module or file (`_STD_MODULES`: `thread`, `sync`, `io`, `lib.rs`, ...);
+     the glued-literal case (`stdinstd/src/sync/once.rs`) still works. Limit: a project directory
+     ending in `std` whose first sub-folder is also a std module name (`nostd/src/io/...`) is still cut.
+  2. JSON `binary_detail.deletions` is capped at 200 entries (`_DELETIONS_JSON_MAX`); the new field
+     `binary_detail.deletions_total` has the full count. Schema version unchanged (additive field).
+  3. `_removed_chunk` limits: a literal over 4096 characters is not scanned (counted as layout, as
+     before round 8); a removed piece over 200 characters is shown cut with an ellipsis (the count test
+     uses the cut piece); at most 2000 strings per build are examined (sorted, so the same ones every run),
+     the rest are counted as layout. Search tries stay at 20 per string.
+- **Tests:** full `python -m unittest discover -s tests` run, 372 pass (364 before; 8 new).
+- **Open:** the 2000-string budget and 4096 cap are untuned guesses; no large real pair was timed
+  against them in this pass.

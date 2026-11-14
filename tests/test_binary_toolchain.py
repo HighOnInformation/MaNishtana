@@ -367,3 +367,62 @@ class RelayoutFalseNegatives(unittest.TestCase):
     def test_an_upper_case_label_is_not_code(self):
         added, _ = self._changed(b"", b"\x00WARNING:\x00")
         self.assertEqual(added, ["WARNING:"])
+
+    def test_a_project_path_ending_in_std_src_is_not_compiler_noise(self):
+        # "nostd/src/" must not be cut at its "std/src/" tail
+        added, _ = self._changed(b"\x00nostd/src/engine.rsone message here\x00",
+                                 b"\x00nostd/src/engine2.rsone message here\x00")
+        self.assertEqual(added, ["nostd/src/engine2.rsone message here"])
+
+    def test_a_project_path_ending_in_alloc_src_is_not_compiler_noise(self):
+        added, _ = self._changed(b"\x00myalloc/src/pool.rsone message here\x00",
+                                 b"\x00myalloc/src/pool2.rsone message here\x00")
+        self.assertEqual(added, ["myalloc/src/pool2.rsone message here"])
+
+    def test_a_real_std_path_glued_to_a_literal_is_still_noise(self):
+        old = b"\x00stdinstd/src/sync/once.rslock count overflow in reentrant mutex\x00"
+        new = b"\x00stdinstd/src/thread/mod.rslock count overflow in reentrant mutex\x00"
+        added, _ = self._changed(old, new)
+        self.assertEqual(added, [])
+
+    def test_json_deletions_are_capped_with_a_total(self):
+        from manishtana.output import _DELETIONS_JSON_MAX, _binary_json
+        items = ["literal number %d (removed: piece)" % n for n in range(_DELETIONS_JSON_MAX + 50)]
+        summary = BinarySummary(*[None] * len(BinarySummary._fields))._replace(deletions=items)
+        detail = _binary_json(summary)
+        self.assertEqual(len(detail["deletions"]), _DELETIONS_JSON_MAX)
+        self.assertEqual(detail["deletions_total"], _DELETIONS_JSON_MAX + 50)
+        self.assertEqual(detail["deletions"][0], items[0])
+
+    def test_json_without_deletions_has_a_zero_total(self):
+        from manishtana.output import _binary_json
+        summary = BinarySummary(*[None] * len(BinarySummary._fields))._replace(deletions=[])
+        detail = _binary_json(summary)
+        self.assertEqual((detail["deletions"], detail["deletions_total"]), ([], 0))
+
+    def test_a_huge_literal_is_not_scanned_for_a_removed_chunk(self):
+        from manishtana.binnoise import _MAX_LITERAL, _removed_chunk
+        base = "word " * (_MAX_LITERAL // 5 + 100)
+        other = "start of the literal " + base + "and the end"
+        text = "start of the literal " + base[:-10] + "and the end"
+        self.assertIsNone(_removed_chunk(text, other, text))
+
+    def test_a_huge_removed_chunk_is_reported_truncated(self):
+        from manishtana.binnoise import _MAX_CHUNK, _removed_chunk
+        chunk = "unique words in this long deleted piece " * 40
+        other = "the head of the literal " + chunk + " the tail of the literal"
+        text = "the head of the literal  the tail of the literal"
+        got = _removed_chunk(text, other, text)
+        self.assertIsNotNone(got)
+        self.assertLessEqual(len(got), _MAX_CHUNK + 1)
+
+    def test_deletion_checks_are_budgeted_and_the_rest_counted_as_layout(self):
+        from manishtana import binnoise
+        old_max = binnoise._MAX_DELETION_CHECKS
+        binnoise._MAX_DELETION_CHECKS = 2
+        self.addCleanup(setattr, binnoise, "_MAX_DELETION_CHECKS", old_max)
+        a = [("the quick brown fox %d jumps over the lazy sleeping dog today" % n) for n in range(6)]
+        b = [x.replace("sleeping ", "") for x in a]
+        _, _, dropped, deletions = binnoise._drop_layout_noise(set(b), set(a), a, b)
+        self.assertEqual(len(deletions), 2)
+        self.assertGreaterEqual(dropped, 4)

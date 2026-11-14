@@ -866,8 +866,17 @@ def _links_json(links):
     return {text: list(shas) for text, shas in links.strings.items()} if links is not None else {}
 
 
+_DELETIONS_JSON_MAX = 200   # deletions kept in the JSON; "deletions_total" has the real count
+
+
 def _binary_json(summary):
-    return dict(summary._asdict()) if summary is not None else None
+    if summary is None:
+        return None
+    detail = dict(summary._asdict())
+    deletions = list(detail.get("deletions") or [])
+    detail["deletions"] = deletions[:_DELETIONS_JSON_MAX]
+    detail["deletions_total"] = len(deletions)
+    return detail
 
 
 def _metadata_only_note(rel, real):
