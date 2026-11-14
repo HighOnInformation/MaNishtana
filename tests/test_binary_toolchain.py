@@ -123,3 +123,29 @@ class ToolchainFunctions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RebuildHashNoise(unittest.TestCase):
+    """Same upstream version rebuilt (alpine 3.21 -> 3.22, ripgrep 14.1.1): the cargo
+    registry directory and the rustc commit are build hashes, so a packed literal that
+    differs only in them is noise, not a changed string."""
+
+    setUp = ToolchainStrings.setUp
+    _sum = ToolchainStrings._sum
+
+    def test_registry_and_rustc_hashes_alone_do_not_change_a_string(self):
+        old = (b"\x00/home/b/.cargo/registry/src/index.crates.io-6f17d22bba15001f/bstr-1.10.0/src/io.rs"
+               b"and /rustc/f6e511eec7342f59a25f7c0534f1dbea00d01b14/library/std/src/thread/mod.rs\x00")
+        new = old.replace(b"6f17d22bba15001f", b"1949cf8c6b5b557f").replace(
+            b"f6e511eec7342f59a25f7c0534f1dbea00d01b14",
+            b"05f9846f893b09a1be1fc8560e33fc3c815cfecb")
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added, s.strings_removed), ([], []))
+        self.assertEqual(s.strings_added_total + s.strings_removed_total, 0)
+
+    def test_a_real_change_next_to_the_hashes_is_still_reported(self):
+        old = b"\x00index.crates.io-6f17d22bba15001f/bstr-1.10.0/src/io.rs failed\x00"
+        new = b"\x00index.crates.io-1949cf8c6b5b557f/bstr-1.11.0/src/io.rs failed\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+        self.assertIn("bstr-1.11.0", s.strings_added[0])

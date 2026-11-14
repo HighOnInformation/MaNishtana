@@ -782,3 +782,31 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
   Go `vcs.revision` as "Built from git revision", Debian `/usr/src/rustc-X/` as a
   rustc version, flag-only GCC changes as a toolchain change.
 - **Tests:** 334 pass (`python -m unittest discover -s tests`).
+
+### Round 6 (2026-11-14): same-version controls, rebuild hash noise
+
+- **Control 1, identical binary twice** (alpine 3.21 `ripgrep` 14.1.1 `rg`, ELF, copied to
+  two directories; byte level, `--no-llm`, 1 s): "no differences", 0 real, 0 noise.
+  Noise only, as required. Nothing was executed; the apk was only downloaded and the
+  one file extracted with `tar`.
+- **Control 2, true rebuild of the same upstream version** (ripgrep 14.1.1, alpine 3.21 vs
+  3.22 `rg`, 3,416,168 -> 3,447,144 bytes, different SHA-256; bytes, 33 s before the
+  fix, 21 s after): reported as 1 modified file, 2 differing regions, 203 strings added
+  and 205 removed. The source did not change, so this is all noise. Its causes: (a) the
+  rustc commit and the cargo registry directory (`index.crates.io-<16 hex>`), which sit
+  inside packed literals; (b) literals re-laid out by a different rustc/std.
+- **Fix:** both build hashes are masked before strings are compared (`index.crates.io-<hash>`,
+  `/rustc/<hash>/`); the rustc commit is still reported as a "Toolchain changed" line.
+  Result on the rebuild pair: 203/205 -> 193/195 strings. Honest assessment: only a
+  small part; the rest is std/dependency literal churn that still looks like change, so
+  a rebuild is **not yet reported as noise only**. A next step is to drop strings whose
+  source path is inside the compiler library or a registry (as the commit linker
+  already does), or to compare literals by their pieces split at path boundaries.
+- ghidriff on the controls was not run (time: 400-900 s per pair; the byte level
+  already shows the problem).
+- **Finding 3 status:** already implemented on this branch in earlier commits (links by
+  string literal, packed-literal version, quoted file name; labelled as candidate links
+  in the report). The Rust crate and Go module drafts in `wt/manish-s13` are
+  superseded by commit 725e150 (same tests exist in `tests/test_binary_deps.py`);
+  nothing to copy.
+- **Tests:** 336 pass.

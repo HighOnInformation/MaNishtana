@@ -767,9 +767,21 @@ def _join_excerpts(parts):
             + ("…" if last[1] < len(last[2]) else ""))
 
 
+# Build hashes embedded in Rust paths: the cargo registry directory
+# ("index.crates.io-<16 hex>") and the rustc commit ("/rustc/<40 hex>/"). A rebuild
+# of the same version changes them, so they are masked before strings are compared.
+_BUILD_HASH_RE = re.compile(rb"(index\.crates\.io-)[0-9a-f]{16}|(/rustc/)[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _mask_build_hashes(data):
+    return _BUILD_HASH_RE.sub(
+        lambda m: (m.group(1) + b"<hash>") if m.group(1) else (m.group(2) + b"<hash>"), data)
+
+
 def _strings(data):
     if data is None:
         return set()
+    data = _mask_build_hashes(data)
     found = set(match.decode("ascii") for match in _STRING_RE.findall(data))
     for match in _SHORT_RE.finditer(data):
         text = match.group(1)
