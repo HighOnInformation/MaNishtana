@@ -239,3 +239,56 @@ class RebuildLiteralRelayout(unittest.TestCase):
                                sections={}, binaries={"rg"})
         text = build_report("A", "B", comparison, {}, None, binary={"rg": summary})
         self.assertIn("7 strings differ only in literal layout or look like code bytes", text)
+
+
+class RelayoutFalseNegatives(unittest.TestCase):
+    """Real edits that must survive the layout-noise filter (review of round 7)."""
+
+    setUp = ToolchainStrings.setUp
+    _sum = ToolchainStrings._sum
+    F = b"\x00filler string number one\x00"
+
+    def _changed(self, old, new):
+        s = self._sum(self.F + old, self.F + new)
+        return s.strings_added, s.strings_removed
+
+    def test_a_word_inserted_near_the_start_is_reported(self):
+        added, _ = self._changed(b"\x00do follow symbolic links\x00",
+                                 b"\x00do not follow symbolic links\x00")
+        self.assertEqual(added, ["do not follow symbolic links"])
+
+    def test_a_changed_first_word_is_reported(self):
+        added, removed = self._changed(b"\x00Disable the frobnicator option\x00",
+                                       b"\x00Enable the frobnicator option\x00")
+        self.assertEqual((added, removed), (["Enable the frobnicator option"],
+                                            ["Disable the frobnicator option"]))
+
+    def test_a_changed_last_word_is_reported(self):
+        added, _ = self._changed(b"\x00search hidden files and dirs\x00",
+                                 b"\x00search hidden files and links\x00")
+        self.assertEqual(added, ["search hidden files and links"])
+
+    def test_a_plural_at_the_end_is_reported(self):
+        added, _ = self._changed(b"\x00failed to spawn worker thread\x00",
+                                 b"\x00failed to spawn worker threads\x00")
+        self.assertEqual(added, ["failed to spawn worker threads"])
+
+    def test_a_renamed_project_source_file_is_reported(self):
+        added, _ = self._changed(b"\x00crates/core/src/main.rsok\x00",
+                                 b"\x00crates/core/src/mainx.rsok\x00")
+        self.assertEqual(added, ["crates/core/src/mainx.rs"])
+
+    def test_a_short_literal_glued_at_an_end_still_counts_as_layout(self):
+        # "stdin" is glued after a long seen literal in one build, alone in the other
+        old = b"\x00.extension cannot contain path separators: \x00stdin and more\x00"
+        new = b"\x00.extension cannot contain path separators: stdin\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added, [])
+
+    def test_an_environment_variable_name_is_not_code(self):
+        added, _ = self._changed(b"", b"\x00RG_DEBUG_LOG\x00NO_COLOR\x00")
+        self.assertEqual(sorted(added), ["NO_COLOR", "RG_DEBUG_LOG"])
+
+    def test_an_upper_case_label_is_not_code(self):
+        added, _ = self._changed(b"", b"\x00WARNING:\x00")
+        self.assertEqual(added, ["WARNING:"])

@@ -837,9 +837,16 @@ _WINDOW_LIMIT = 6_000_000
 _WORD_RE = re.compile(r"[a-z]{3}|[A-Z][a-z]{2}")
 
 
+# An upper-case name ("NO_COLOR", "RG_DEBUG_LOG") or label ("WARNING:") has no
+# lower-case word but is text a release adds; instruction bytes ("AWAVAUAT", "H;l$`u!H")
+# have neither an underscore between upper-case runs nor a trailing colon.
+_UPPER_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\Z|[A-Z]{3,}:\Z")
+
+
 def _is_code_like(text):
     """Short, no 3-letter word, no format mark and not a version: instruction bytes."""
     return (len(text) <= 12 and "%" not in text and not _WORD_RE.search(text)
+            and not _UPPER_NAME_RE.match(text)
             and not text.startswith("\\x1b[") and not _VERSION_RE.match(text.encode("ascii", "replace")))
 
 
@@ -855,13 +862,16 @@ _EDGE_WORD = 7          # a short literal glued to one end of a seen string, let
 _EDGE_REST = 16         # ... and at least this much of the string is seen elsewhere
 
 
-def _is_relaid(text, other_windows):
+def _is_relaid(text, other_windows, other_text):
     """True if nothing but a join is unseen: every letter or digit is covered by a window
     that exists on the other side, except at most a short letters-only literal (or
     punctuation) glued to one end of a long string that is otherwise seen.
 
-    Interior changes, digits (a version bump) and longer runs are new text. Limit: a
-    changed word of up to 7 letters at the very end of a long literal looks like a join.
+    That edge literal must itself exist on the other side (a glued literal moves, it
+    does not vanish) and hold at least three letters, so "do not follow", "Enable" for
+    "Disable" and a plural "s" stay changes. Interior changes, digits (a version bump)
+    and longer runs are new text. Limit: a changed edge word of 3 to 7 letters that
+    happens to appear elsewhere on the other side still looks like a join.
     """
     covered = [False] * len(text)
     for at in range(len(text) - _WINDOW + 1):
@@ -880,7 +890,13 @@ def _is_relaid(text, other_windows):
         edge = i < first or i > last
         if not edge or char.isdigit():
             return False
-    return (first <= _EDGE_WORD) and (len(text) - 1 - last <= _EDGE_WORD)
+    if first > _EDGE_WORD or len(text) - 1 - last > _EDGE_WORD:
+        return False
+    for fragment in (text[:first], text[last + 1:]):
+        letters = sum(1 for char in fragment if char.isalnum())
+        if letters and (letters < 3 or fragment.strip() not in other_text):
+            return False
+    return True
 
 
 def _drop_layout_noise(new_b, new_a, all_a, all_b):
@@ -891,8 +907,9 @@ def _drop_layout_noise(new_b, new_a, all_a, all_b):
     new_b, new_a, dropped = new_b - code_b, new_a - code_a, len(code_b) + len(code_a)
     if sum(map(len, all_a)) + sum(map(len, all_b)) <= _WINDOW_LIMIT:
         win_a, win_b = _windows(all_a), _windows(all_b)
-        keep_b = {t for t in new_b if len(t) < _WINDOW or not _is_relaid(t, win_a)}
-        keep_a = {t for t in new_a if len(t) < _WINDOW or not _is_relaid(t, win_b)}
+        text_a, text_b = "\x00".join(all_a), "\x00".join(all_b)
+        keep_b = {t for t in new_b if len(t) < _WINDOW or not _is_relaid(t, win_a, text_a)}
+        keep_a = {t for t in new_a if len(t) < _WINDOW or not _is_relaid(t, win_b, text_b)}
         dropped += (len(new_b) - len(keep_b)) + (len(new_a) - len(keep_a))
         new_b, new_a = keep_b, keep_a
     return new_b, new_a, dropped
