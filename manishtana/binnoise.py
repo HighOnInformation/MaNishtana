@@ -47,20 +47,25 @@ BinarySummary = collections.namedtuple(
 # is not a source change, so these strings are taken out of the string lists and
 # reported apart, one line per tool, so GCC 13 -> 14 is a single labelled change.
 _TOOLCHAIN_RES = (
-    (None, re.compile(r"^'?(GNU C\+\+\d*|GNU C\d*) (\d+\.\d+(?:\.\d+)?)")),
+    (None, re.compile(r"^'?(GNU C\+\+\d*|GNU C\d*) (\d+\.\d+(?:\.\d+)?)(?: (.*))?$")),
     ("GCC", re.compile(r"^GCC: (\(.*?\) ?\d+\.\d+(?:\.\d+)?)")),
-    ("clang", re.compile(r"\bclang version (\d+\.\d+(?:\.\d+)?)")),
-    ("rustc", re.compile(r"\brustc (\d+\.\d+(?:\.\d+)?)")),
+    # anchored, so a message such as "requires rustc 1.70 or newer" stays a string
+    ("clang", re.compile(r"^(?:[A-Za-z][A-Za-z0-9. -]*? )?clang version (\d+\.\d+(?:\.\d+)?)(?: \(.*)?$")),
+    ("rustc", re.compile(r"^rustc (\d+\.\d+(?:\.\d+)?)(?: \([0-9a-f]{7,}[^)]*\))?$")),
 )
 
 
 def _toolchain_of(text):
+    """(key, value) pairs of one identification string, or None."""
     for key, pattern in _TOOLCHAIN_RES:
         found = pattern.search(text)
         if found:
             if key is None:  # the dialect is part of the compiler's own name
-                return found.group(1), found.group(2)
-            return key, found.group(1)
+                pairs = [(found.group(1), found.group(2))]
+                if found.group(3):  # same version, other flags is still a build change
+                    pairs.append((found.group(1) + " flags", found.group(3)))
+                return pairs
+            return [(key, found.group(1))]
     return None
 
 
@@ -69,8 +74,8 @@ def _toolchain_changes(tool_a, tool_b):
     def by_key(strings):
         out = {}
         for text in strings:
-            key, value = _toolchain_of(text)
-            out.setdefault(key, set()).add(value)
+            for key, value in _toolchain_of(text):
+                out.setdefault(key, set()).add(value)
         return out
     old, new = by_key(tool_a), by_key(tool_b)
     lines = []

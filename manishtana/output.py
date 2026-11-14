@@ -658,7 +658,7 @@ def _function_rows(found, limit, links=None):
             engines = ", ".join("%s: %s" % item for item in sorted(change.views.items()))
         else:
             engines = ", ".join(sorted(change.views))
-        if _is_toolchain_name(change.name_a or change.name_b):
+        if _is_toolchain_change(change):
             engines += " (likely toolchain)"
         linked = ((links.functions if links is not None else {})
                   .get(change.name_a or change.name_b))
@@ -683,6 +683,11 @@ _TOOLCHAIN_NAME_RE = re.compile(
 
 def _is_toolchain_name(name):
     return bool(name) and bool(_TOOLCHAIN_NAME_RE.match(name))
+
+
+def _is_toolchain_change(change):
+    """Either side counts: a FUN_ in one version may be a runtime function in the other."""
+    return _is_toolchain_name(change.name_a) or _is_toolchain_name(change.name_b)
 
 
 _Rows = collections.namedtuple(
@@ -826,7 +831,7 @@ def _functions_json(found, links=None):
                 "pseudo_diff": change.pseudo_diff,
                 "address_a": getattr(change, "address_a", None),
                 "address_b": getattr(change, "address_b", None),
-                "toolchain": _is_toolchain_name(change.name_a or change.name_b),
+                "toolchain": _is_toolchain_change(change),
                 "commits": list(((links.functions if links is not None else {})
                                  .get(change.name_a or change.name_b)) or []),
             }

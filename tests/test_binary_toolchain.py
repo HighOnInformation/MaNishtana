@@ -58,6 +58,28 @@ class ToolchainStrings(unittest.TestCase):
         both = b"\x00GCC: (GNU) 13.2.0\x00"
         self.assertEqual(self._sum(both + b"x" * 9, both + b"y" * 9).toolchain, [])
 
+    def test_prose_that_mentions_a_compiler_stays_a_plain_string(self):
+        # a user-facing message is a real change, not toolchain
+        old = b"\x00requires rustc 1.70 or newer\x00clang version 12 is too old\x00"
+        new = b"\x00requires rustc 1.75 or newer\x00clang version 14 is too old\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.toolchain, [])
+        self.assertEqual(sorted(s.strings_added),
+                         ["clang version 14 is too old", "requires rustc 1.75 or newer"])
+
+    def test_clang_ident_is_still_toolchain(self):
+        s = self._sum(b"\x00clang version 17.0.6 (https://x)\x00",
+                      b"\x00Ubuntu clang version 18.1.3 (1ubuntu1)\x00")
+        self.assertEqual(s.toolchain, ["clang: 17.0.6 -> 18.1.3"])
+
+    def test_same_version_with_other_flags_is_reported(self):
+        s = self._sum(b"\x00GNU C99 13.2.0 -m64 -O2\x00", b"\x00GNU C99 13.2.0 -m64 -O0\x00")
+        self.assertEqual(s.toolchain, ["GNU C99 flags: -m64 -O2 -> -m64 -O0"])
+
+    def test_version_only_change_has_no_flags_line(self):
+        s = self._sum(b"\x00GNU C99 13.2.0 -m64 -O2\x00", b"\x00GNU C99 14.2.0 -m64 -O2\x00")
+        self.assertEqual(s.toolchain, ["GNU C99: 13.2.0 -> 14.2.0"])
+
 
 class ToolchainFunctions(unittest.TestCase):
     def setUp(self):
@@ -90,6 +112,13 @@ class ToolchainFunctions(unittest.TestCase):
         self.assertEqual([c["toolchain"] for c in changes], [False, True])
         self.assertEqual(payload["real"][0]["binary_detail"]["toolchain"],
                          ["GNU C99: 13.2.0 -> 14.2.0"])
+
+    def test_renamed_function_is_labelled_by_either_name(self):
+        from manishtana.output import _function_rows
+        found = FunctionDiff(["ghidriff"], [FunctionChange(
+            "FUN_9", "__mingw_foo", "modified", 0.9, {"ghidriff": "modified"}, None)], [])
+        rows = _function_rows(found, 10)
+        self.assertIn("(likely toolchain)", rows.agreed[0][4])
 
 
 if __name__ == "__main__":
