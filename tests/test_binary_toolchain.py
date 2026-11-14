@@ -436,6 +436,18 @@ class RelayoutFalseNegatives(unittest.TestCase):
         text = "start of the literal and the end"
         self.assertEqual(_removed_chunk(text, huge + "\x00" + real, text), "fully removed words")
 
+    def test_deletions_do_not_depend_on_the_order_of_the_other_sides_strings(self):
+        # more same-prefix literals than the search tries: the join order decided the result
+        from manishtana import binnoise
+        decoys = ["HUF_decx_filler_%02d some unrelated words here" % n for n in range(40)]
+        full = "HUF_decx_target with some removed words inside"
+        cut = "HUF_decx_target inside"   # its seam windows exist on the other side as a literal
+        results = set()
+        for order in (decoys + [full], [full] + decoys, list(reversed(decoys + [full]))):
+            _, _, _, deletions = binnoise._drop_layout_noise({cut}, set(), order + [cut], [cut])
+            results.add(tuple(deletions))
+        self.assertEqual(len(results), 1)
+
     def test_a_huge_removed_chunk_is_reported_truncated(self):
         from manishtana.binnoise import _MAX_CHUNK, _removed_chunk
         chunk = "unique words in this long deleted piece " * 40

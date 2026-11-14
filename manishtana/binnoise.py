@@ -1010,7 +1010,8 @@ def _drop_layout_noise(new_b, new_a, all_a, all_b):
     new_b, new_a, dropped = new_b - code_b, new_a - code_a, len(code_b) + len(code_a)
     if sum(map(len, all_a)) + sum(map(len, all_b)) <= _WINDOW_LIMIT:
         win_a, win_b = _windows(all_a), _windows(all_b)
-        text_a, text_b = "\x00".join(all_a), "\x00".join(all_b)
+        # sorted: the search tries only the first few matches, so set order must not decide
+        text_a, text_b = "\x00".join(sorted(all_a)), "\x00".join(sorted(all_b))
 
         checks = [0]
 
