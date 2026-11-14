@@ -247,8 +247,9 @@ def summarize(path_a, path_b, ignore_strings=None):
         total = len(blocks)
         code_regions = _count_in_code(blocks, norm_a, norm_b)
 
-    strings_a = _strings(data_a)
-    strings_b = _strings(data_b)
+    std_evidence = any(d is not None and b"library/std/src/" in d for d in (data_a, data_b))
+    strings_a = _strings(data_a, std_evidence)
+    strings_b = _strings(data_b, std_evidence)
     tool_a = {text for text in strings_a if _toolchain_of(text)}
     tool_b = {text for text in strings_b if _toolchain_of(text)}
     strings_a, strings_b = strings_a - tool_a, strings_b - tool_b
@@ -794,24 +795,31 @@ _STD_MODULES = (
     "alloc|ascii|backtrace|borrow|boxed|bstr|collections|env|error|f32|f64|ffi|fmt|fs|hash|"
     "io|keyword_docs|lib|macros|net|num|os|panic|panicking|path|personality|pipe|prelude|"
     "process|random|raw_vec|rc|rt|slice|str|string|sync|sys|sys_common|task|thread|time|vec")
-_TOOLCHAIN_PATH_RE = (
+def _toolchain_path_re(std_evidence):
+    # A bare "std/src/<module>" glued straight after a word ("stdinstd/src/sync/") is a
+    # std path only when the binaries also carry the "library/std/src/" form, i.e. were
+    # built with the real std; otherwise "std" must start a path segment, so that
+    # "nostd/src/io/uart.rs" is kept.
+    start = "" if std_evidence else r"(?<![\w.+-])"
+    return (
     r"(?:(?:/[\w<>.+-]+)*?/registry/src/[\w<>.+-]+/|/rustc/<hash>/|/rust/deps/|"
     r"/usr/src/rustc-[\d.]+/|(?:/[\w.+-]+)*?/rustlib/(?:[\w.+-]+/)*?library/|"
-    r"library/(?=(?:core|std|alloc)/src/)|(?=(?:std|alloc)/src/(?:%s)(?:/|\.rs)))"
+    r"library/(?=(?:core|std|alloc)/src/)|" + start + r"(?=(?:std|alloc)/src/(?:%s)(?:/|\.rs)))"
     r"[\w<>.+/-]*?\.rs") % _STD_MODULES
 _OWN_PATH_RE = r"(?:crates/|(?<![\w/.+-])src/)[\w.+-]+(?:/[\w.+-]+)*?\.rs"
-_PATH_SPLIT_RE = re.compile("(%s)|(%s)" % (_TOOLCHAIN_PATH_RE, _OWN_PATH_RE))
+_PATH_SPLIT_RE = {flag: re.compile("(%s)|(%s)" % (_toolchain_path_re(flag), _OWN_PATH_RE))
+                  for flag in (False, True)}
 _PIECE_MIN = 8
 
 
-def _pieces(text):
+def _pieces(text, std_evidence=False):
     """Split a packed literal at its source paths: drop toolchain paths, keep the rest.
 
     Literals are glued together, and a rebuild lays them out in another order, so a
     whole string differs while every piece is the same. Text without a path is
     returned as is.
     """
-    parts = _PATH_SPLIT_RE.split(text)
+    parts = _PATH_SPLIT_RE[std_evidence].split(text)
     if len(parts) == 1:
         return [text]
     pieces = []
@@ -822,13 +830,13 @@ def _pieces(text):
     return [p.strip() for p in pieces if p and len(p.strip()) >= _PIECE_MIN]
 
 
-def _strings(data):
+def _strings(data, std_evidence=False):
     if data is None:
         return set()
     data = _mask_build_hashes(data)
     found = set()
     for match in _STRING_RE.findall(data):
-        found.update(_pieces(match.decode("ascii")))
+        found.update(_pieces(match.decode("ascii"), std_evidence))
     for match in _SHORT_RE.finditer(data):
         text = match.group(1)
         if _ESCAPE_RE.match(text) or _VERSION_RE.match(text) or _LABEL_RE.match(text):

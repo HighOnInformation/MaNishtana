@@ -379,11 +379,32 @@ class RelayoutFalseNegatives(unittest.TestCase):
                                  b"\x00myalloc/src/pool2.rsone message here\x00")
         self.assertEqual(added, ["myalloc/src/pool2.rsone message here"])
 
+    def test_nostd_with_a_real_std_module_name_is_not_compiler_noise(self):
+        # "nostd/src/io/..." contains "std/src/io/", but "std" is not a whole path segment
+        added, _ = self._changed(b"\x00nostd/src/io/uart.rsone message here\x00",
+                                 b"\x00nostd/src/io/uart2.rsone message here\x00")
+        self.assertEqual(added, ["nostd/src/io/uart2.rsone message here"])
+
+    def test_a_bare_std_path_after_a_separator_is_still_noise(self):
+        for sep in (b"/", b" ", b":"):
+            added, _ = self._changed(
+                b"\x00x" + sep + b"std/src/sync/once.rslock count overflow in reentrant mutex\x00",
+                b"\x00x" + sep + b"std/src/thread/mod.rslock count overflow in reentrant mutex\x00")
+            self.assertEqual(added, [], sep)
+
     def test_a_real_std_path_glued_to_a_literal_is_still_noise(self):
+        # the binaries also carry the "library/std/src/" form, so this is the real std
+        evidence = b"\x00library/std/src/fmt/mod.rsanother unrelated message text\x00"
+        old = evidence + b"\x00stdinstd/src/sync/once.rslock count overflow in reentrant mutex\x00"
+        new = evidence + b"\x00stdinstd/src/thread/mod.rslock count overflow in reentrant mutex\x00"
+        added, _ = self._changed(old, new)
+        self.assertEqual(added, [])
+
+    def test_a_glued_bare_std_path_without_real_std_evidence_is_kept(self):
         old = b"\x00stdinstd/src/sync/once.rslock count overflow in reentrant mutex\x00"
         new = b"\x00stdinstd/src/thread/mod.rslock count overflow in reentrant mutex\x00"
         added, _ = self._changed(old, new)
-        self.assertEqual(added, [])
+        self.assertEqual(len(added), 1)
 
     def test_json_deletions_are_capped_with_a_total(self):
         from manishtana.output import _DELETIONS_JSON_MAX, _binary_json
