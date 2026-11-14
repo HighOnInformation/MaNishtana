@@ -38,8 +38,8 @@ import struct
 BinarySummary = collections.namedtuple(
     "BinarySummary",
     "format size_a size_b sha_a sha_b regions regions_total strings_added "
-    "strings_removed strings_added_total strings_removed_total code_regions toolchain",
-    defaults=(None, None),
+    "strings_removed strings_added_total strings_removed_total code_regions toolchain dependencies revisions",
+    defaults=(None, None, None, None),
 )
 
 # Round 1 finding 2: the compiler or runtime that built a binary leaves its name in
@@ -94,6 +94,8 @@ def _toolchain_changes(tool_a, tool_b):
 
 
 _RUSTC_PATH_RE = re.compile(rb"/rustc/([0-9a-f]{40})/")
+# Debian builds against its own rust source package, whose path names the version.
+_RUSTC_SRC_RE = re.compile(rb"/usr/src/rustc-(\d+\.\d+\.\d+)/")
 
 
 def _rustc_commit_change(data_a, data_b):
@@ -101,10 +103,60 @@ def _rustc_commit_change(data_a, data_b):
     literals, so a different compiler shows up only as scattered string noise."""
     def commits(data):
         return set(m.decode("ascii")[:12] for m in _RUSTC_PATH_RE.findall(data or b""))
+    def versions(data):
+        return set(m.decode("ascii") for m in _RUSTC_SRC_RE.findall(data or b""))
+    lines = []
+    old, new = versions(data_a), versions(data_b)
+    if old and new and old != new:
+        lines.append("rustc: %s -> %s" % (", ".join(sorted(old)), ", ".join(sorted(new))))
     old, new = commits(data_a), commits(data_b)
-    if not old or not new or old == new:
-        return []
-    return ["rustc commit: %s -> %s" % (", ".join(sorted(old)), ", ".join(sorted(new)))]
+    if old and new and old != new:
+        lines.append("rustc commit: %s -> %s" % (", ".join(sorted(old)), ", ".join(sorted(new))))
+    return lines
+
+
+# A Rust binary quotes its crates' source paths in its panic locations, either from
+# cargo's registry ("/registry/src/<index>/<crate>-<version>/") or from a distro's
+# vendored copy ("/usr/share/cargo/registry/<crate>-<version>/"). A Go binary embeds
+# its module list ("dep<TAB>path<TAB>version") and, when built from a checkout, the
+# revision ("vcs.revision=<sha>"). Those are dependency updates, not the project's.
+_CRATE_RE = re.compile(
+    rb"(?:/registry/src/[^/\x00-\x20]+/|/usr/share/cargo/registry/)"
+    rb"([A-Za-z0-9_][A-Za-z0-9_.-]*?)-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(?:\+[0-9A-Za-z.]+)?/")
+_GO_DEP_RE = re.compile(rb"dep\t([^\s\x00]+)\t(v[^\s\x00]+)")
+_GO_REV_RE = re.compile(rb"vcs\.revision=([0-9a-f]{40})")
+
+
+def _dependency_changes(data_a, data_b):
+    """Lines like 'clap: 4.5.1 -> 4.5.2', 'foo: added 1.0.0', 'bar: removed 0.2.0'."""
+    def found(data):
+        out = {}
+        for regex in (_CRATE_RE, _GO_DEP_RE):
+            for name, version in regex.findall(data or b""):
+                out.setdefault(name.decode("ascii"), set()).add(version.decode("ascii"))
+        return out
+    old, new = found(data_a), found(data_b)
+    lines = []
+    for name in sorted(set(old) | set(new)):
+        before, after = old.get(name, set()), new.get(name, set())
+        if before == after:
+            continue
+        if before and after:
+            lines.append("%s: %s -> %s" % (name, ", ".join(sorted(before)), ", ".join(sorted(after))))
+        elif after:
+            lines.append("%s: added %s" % (name, ", ".join(sorted(after))))
+        else:
+            lines.append("%s: removed %s" % (name, ", ".join(sorted(before))))
+    return lines
+
+
+def _build_revisions(data_a, data_b):
+    """(old, new) git revision a Go binary was built from, or None if same or unknown."""
+    def revision(data):
+        found = _GO_REV_RE.search(data or b"")
+        return found.group(1).decode("ascii") if found else None
+    old, new = revision(data_a), revision(data_b)
+    return (old, new) if old and new and old != new else None
 
 
 _BLOCK = 4096
@@ -215,6 +267,8 @@ def summarize(path_a, path_b, ignore_strings=None):
         strings_removed_total=len(removed),
         code_regions=code_regions,
         toolchain=_toolchain_changes(tool_a, tool_b) + _rustc_commit_change(data_a, data_b),
+        dependencies=_dependency_changes(data_a, data_b),
+        revisions=_build_revisions(data_a, data_b),
     )
 
 

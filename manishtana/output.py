@@ -580,6 +580,12 @@ def _binary_facts(summary, links=None, commits=None):
         facts.append(runs)
     if getattr(summary, "toolchain", None):
         facts.append([("Toolchain changed: %s" % "; ".join(summary.toolchain), False)])
+    if getattr(summary, "dependencies", None):
+        facts.append([("Dependencies changed: %s" % "; ".join(summary.dependencies), False)])
+    if getattr(summary, "revisions", None):
+        facts.append([("Built from git revision %s -> %s (git log %s..%s)"
+                       % (summary.revisions[0][:12], summary.revisions[1][:12],
+                          summary.revisions[0][:12], summary.revisions[1][:12]), False)])
     if links is not None and links.strings:
         subjects = dict((item.sha, item.subject) for item in (commits or []))
         runs = [("Linked to commits: ", False)]

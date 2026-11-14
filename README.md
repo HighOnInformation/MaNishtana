@@ -378,7 +378,15 @@ each commit in the range, and the report names the commits ("Linked to commits: 
 functions are also matched by name in hunk headers and changed lines. This is
 evidence, not proof: a change that adds no literal stays unlinked, and a literal that
 many commits touch names up to five of them. Strings of fewer than six characters are
-never matched.
+never matched, except a version (`1.7.1`), which is also matched when it sits inside a
+longer packed Rust or Go literal.
+
+**Dependencies and build revision.** A Rust binary quotes its crates' source paths and a Go
+binary its module list, so a crate or module whose version changed is reported as one line,
+"Dependencies changed: clap: 4.5.1 -> 4.5.2" (JSON: `binary_detail.dependencies`), apart from
+the strings. A Go binary's `vcs.revision` change is shown with a `git log OLD..NEW` hint
+(`binary_detail.revisions`), and a Debian-built Rust binary's `rustc` version joins the
+toolchain line. The strings themselves are still listed; they are not hidden.
 
 ### Function-level comparison — optional engines
 

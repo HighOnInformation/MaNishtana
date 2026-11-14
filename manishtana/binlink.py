@@ -31,6 +31,7 @@ _MIN_LITERAL = 6
 _MIN_NAME = 5
 
 _LITERAL_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+_VERSION_RE = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?!\d|\.\d)")
 _FUN_RE = re.compile(r"^(FUN|SUB|LAB|DAT|sub|loc)_[0-9A-Fa-f]+$")
 
 
@@ -49,7 +50,13 @@ def literals(pseudo_diff):
 def pieces(text):
     """Split an excerpted string at its ellipses; drop pieces too short to match on."""
     parts = re.split(r"\s*…\s*", text)
-    return [part for part in parts if len(part) >= _MIN_LITERAL]
+    found = [part for part in parts if len(part) >= _MIN_LITERAL]
+    # Rust and Go pack their literals without NULs, so a version sits inside a long
+    # run no commit contains whole; the version itself is what a bump commit changed.
+    for version in _VERSION_RE.findall(text):
+        if version not in found:
+            found.append(version)
+    return found
 
 
 def link(commits, patches, strings, changes):
