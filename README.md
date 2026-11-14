@@ -381,6 +381,11 @@ many commits touch names up to five of them. Strings of fewer than six character
 never matched, except a version (`1.7.1`), which is also matched when it sits inside a
 longer packed Rust or Go literal.
 
+Code that quotes a source file name (a Rust panic location, a C assert, a log line) is also
+tied to the commits that changed that file, after the commits matched by a literal. That is
+weaker evidence (the file changed, not necessarily these lines), a same-named file of another
+project can match falsely, and a change in a file the binary never quotes stays unlinked.
+
 **Dependencies and build revision.** A Rust binary quotes its crates' source paths and a Go
 binary its module list, so a crate or module whose version changed is reported as one line,
 "Dependencies changed: clap: 4.5.1 -> 4.5.2" (JSON: `binary_detail.dependencies`), apart from
