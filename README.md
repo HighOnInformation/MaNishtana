@@ -242,6 +242,7 @@ python3 -m manishtana --git /path/to/repo --from origin/main            # --to d
 | `--from` | — | The old revision |
 | `--to` | `HEAD` | The new revision |
 | `--intent-context` | off | Also give the commit messages to the model — see below |
+| `--link-repo REPO` | off | With two directories and `--from/--to`: link binary findings to that range's commits (automatic under `--git`) |
 
 The export uses `git archive`, so nothing in your working tree is touched, no
 `.git` directory reaches the comparison, and a dirty checkout does not affect the
@@ -367,6 +368,17 @@ size before and after, SHA-256 of both, the differing byte regions (found on the
 normalized bytes, so a time stamp is not one of them; differences within 4 KB of
 each other are one region) and the printable strings of 8+ characters added and
 removed — often the quickest clue to what changed.
+
+**Linking to commits.** Under `--git`, or with two directories plus
+`--link-repo REPO --from REV [--to REV]`, a string added or removed in a binary, and a
+changed function whose decompiled code quotes a string literal (a stripped binary has
+only `FUN_…` names, but its literals survive), is matched against the changed lines of
+each commit in the range, and the report names the commits ("Linked to commits: …", a
+`commit` note in the function table, `binary_links` and `commits` in the JSON). Named
+functions are also matched by name in hunk headers and changed lines. This is
+evidence, not proof: a change that adds no literal stays unlinked, and a literal that
+many commits touch names up to five of them. Strings of fewer than six characters are
+never matched.
 
 ### Function-level comparison — optional engines
 
@@ -523,7 +535,7 @@ them declarable too.
 |---|---|---|
 | `-o` Markdown | You, a ticket, a terminal | Unified diff, disclosures collapsed |
 | `-H` HTML | A human reviewer, offline | Self-contained, side-by-side, no JavaScript |
-| `-j` JSON | Agents, CI, review bots | `schema_version: 3` |
+| `-j` JSON | Agents, CI, review bots | `schema_version: 4` |
 
 The report opens with the whole-change brief, the executive summary, and any
 cross-reference findings — then the file table, then each change.

@@ -28,7 +28,7 @@ from .output import build_html, build_json, build_report
 from .settings import load as load_settings
 from .rules import binary_ignore_strings
 from .symbols import cross_reference
-from . import binengines, gitrepo
+from . import binengines, binlink, gitrepo
 
 
 def main(argv=None):
@@ -76,10 +76,33 @@ def main(argv=None):
         if not os.path.isdir(path):
             sys.stderr.write("Error: '%s' is not an existing directory.\n" % path)
             return 2
-    return _run(args, config, settings, dir_a, dir_b, [])
+    commits, patches = [], None
+    if args.link_repo:
+        if not args.rev_a:
+            sys.stderr.write("Error: --link-repo needs --from REV (--to defaults to HEAD).\n")
+            return 2
+        if not os.path.isdir(args.link_repo):
+            sys.stderr.write("Error: '%s' is not an existing directory.\n" % args.link_repo)
+            return 2
+        commits, patches = _range(args.link_repo, args.rev_a, args.rev_b or "HEAD")
+        if commits is None:
+            return 2
+    return _run(args, config, settings, dir_a, dir_b, commits, patches)
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _range(repo, rev_a, rev_b):
+    """(commits, patches) for a revision range, or (None, None) after an error message."""
+    shas = []
+    for rev in (rev_a, rev_b):
+        sha = gitrepo.resolve(repo, rev)
+        if sha is None:
+            sys.stderr.write("Error: '%s' does not name a commit in %s.\n" % (rev, repo))
+            return None, None
+        shas.append(sha)
+    return gitrepo.commits(repo, shas[0], shas[1]), gitrepo.patches(repo, shas[0], shas[1])
 
 
 def _run_git(args, config, settings):
@@ -124,10 +147,11 @@ def _run_git(args, config, settings):
         print("Comparing %s..%s (%d commit%s) from %s"
               % (resolved["from"][:9], resolved["to"][:9], len(commits),
                  "" if len(commits) == 1 else "s", args.git))
-        return _run(args, config, settings, dir_a, dir_b, commits)
+        return _run(args, config, settings, dir_a, dir_b, commits,
+                    gitrepo.patches(args.git, resolved["from"], resolved["to"]))
 
 
-def _run(args, config, settings, dir_a, dir_b, commits):
+def _run(args, config, settings, dir_a, dir_b, commits, patches=None):
     """The pipeline itself, identical whichever input shape produced the trees."""
     llm = config.get("llm") or {}
     comparison = compare(dir_a, dir_b, config.get("rules") or [], settings)
@@ -137,6 +161,8 @@ def _run(args, config, settings, dir_a, dir_b, commits):
     binary = {rel: summarize_binary(old, new, binary_ignore_strings(rules, rel))
               for rel, (old, new) in pairs.items()}
     functions = _binary_functions(args.engines, settings, pairs)
+
+    links = _commit_links(commits, patches, binary, functions)
 
     # Decompiled diffs reach the model through the ordinary per-file pass: the
     # binary gets a text section and stops counting as "not analysed". llm.py
@@ -186,6 +212,7 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         "functions": functions,
         "decompiled": decompiled,
         "max_functions": settings.binary["max_functions"],
+        "links": links,
     }
     report = build_report(dir_a, dir_b, comparison, analyses, summary, **shared)
     if not _write(args.output, report, "report"):
@@ -208,6 +235,23 @@ def _run(args, config, settings, dir_a, dir_b, commits):
         % (args.output, len(comparison.real), len(comparison.noise), len(comparison.skipped))
     )
     return 0
+
+
+def _commit_links(commits, patches, binary, functions):
+    """{file: binlink.Links} for every binary a commit in the range can be tied to."""
+    if not commits or not patches:
+        return {}
+    links = {}
+    for rel in set(binary) | set(functions):
+        summary = binary.get(rel)
+        strings = []
+        if summary is not None:
+            strings = list(summary.strings_added) + list(summary.strings_removed)
+        found = functions.get(rel)
+        result = binlink.link(commits, patches, strings, found.changes if found else [])
+        if result.strings or result.functions:
+            links[rel] = result
+    return links
 
 
 def _check_ignore_strings(rules):
@@ -298,6 +342,12 @@ def _parse_args(argv):
     )
     parser.add_argument(
         "--to", dest="rev_b", metavar="REV", help="with --git: the new revision (default: HEAD)"
+    )
+    parser.add_argument(
+        "--link-repo", metavar="REPO", help="with two directories and --from/--to: tie string "
+        "and function findings in binaries to the commits of that range in REPO (a stripped "
+        "binary has no function names, but its string literals appear in the commits that "
+        "changed them). Under --git this happens on its own."
     )
     parser.add_argument(
         "--intent-context",

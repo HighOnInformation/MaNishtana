@@ -45,6 +45,15 @@ class ToolchainStrings(unittest.TestCase):
         s = self._sum(b"\x00", b"\x00rustc 1.82.0 (f6e511eec 2024-10-15)\x00")
         self.assertEqual(s.toolchain, ["rustc: added 1.82.0"])
 
+    def test_rustc_commit_in_embedded_paths_is_a_toolchain_change(self):
+        # alpine 3.21 -> 3.22 rebuild of ripgrep 14.1.1: the rustc hash sits inside
+        # packed literals, so it never shows as a string of its own.
+        old = b"\x00xx/rustc/" + b"f6e511eec7342f59a25f7c0534f1dbea00d01b14" + b"/library/core\x00"
+        new = b"\x00xx/rustc/" + b"05f9846f893b09a1be1fc8560e33fc3c815cfecb" + b"/library/core\x00"
+        self.assertEqual(self._sum(old, new).toolchain,
+                         ["rustc commit: f6e511eec734 -> 05f9846f893b"])
+        self.assertEqual(self._sum(old, old + b"y" * 9).toolchain, [])
+
     def test_same_compiler_is_not_reported(self):
         both = b"\x00GCC: (GNU) 13.2.0\x00"
         self.assertEqual(self._sum(both + b"x" * 9, both + b"y" * 9).toolchain, [])

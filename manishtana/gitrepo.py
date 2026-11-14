@@ -6,6 +6,7 @@ Public interface:
     export(repo, rev, dest)                   write that revision's tree into dest
     commits(repo, rev_a, rev_b) -> [Commit]   oldest first, exclusive of rev_a
     intent_text(commits) -> str               the stated intent, as prompt-ready prose
+    patches(repo, rev_a, rev_b) -> {sha: patch text}   what each commit changed, for linking
 
 The rest of the tool compares directories and knows nothing about revisions. This
 module is the adapter: it turns "the last commit of this repo" into the pair of
@@ -102,6 +103,28 @@ def commits(repo, rev_a, rev_b):
         warn("cannot read commit messages: %s — continuing without them." % exc)
         return []
     return _parse_log(out.decode("utf-8", "replace"))
+
+
+def patches(repo, rev_a, rev_b):
+    """{sha: unified diff} for every commit in the range, or {} when git cannot say.
+
+    Used to link binary findings to commits (binlink). Zero context lines: only the
+    changed lines and the hunk headers matter there, and a commit's context would
+    otherwise make every neighbouring line look changed.
+    """
+    marker = _RECORD + _FIELD
+    try:
+        out = _git(repo, ["log", "--reverse", "--no-merges", "--unified=0", "-p",
+                          "--format=" + marker + "%H", "%s..%s" % (rev_a, rev_b)])
+    except GitError as exc:
+        warn("cannot read patches: %s — continuing without commit links." % exc)
+        return {}
+    found = {}
+    for record in out.decode("utf-8", "replace").split(marker)[1:]:
+        sha, _, patch = record.partition(chr(10))
+        if sha.strip():
+            found[sha.strip()] = patch
+    return found
 
 
 def intent_text(items):

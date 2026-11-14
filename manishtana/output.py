@@ -203,7 +203,7 @@ def _labels(risk):
 
 def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None,
                risk=None, settings=None, commits=None, intent_shown=False, binary=None,
-               functions=None, decompiled=None, max_functions=200):
+               functions=None, decompiled=None, max_functions=200, links=None):
     """Machine-readable output for the rest of the pipeline (agent, CI, review bot)."""
     file_label, summary_label = _labels(risk)
     files = []
@@ -215,7 +215,9 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
                 "status": comparison.real[rel][0],
                 "binary": rel in comparison.binaries,
                 "binary_detail": _binary_json((binary or {}).get(rel)),
-                "binary_functions": _functions_json((functions or {}).get(rel)),
+                "binary_functions": _functions_json((functions or {}).get(rel),
+                                                    (links or {}).get(rel)),
+                "binary_links": _links_json((links or {}).get(rel)),
                 "risk": _extract_risk(analysis, file_label),
                 "analysis": analysis,
                 "diff": comparison.sections.get(rel),
@@ -227,7 +229,9 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
         # 3: added "binary_detail" on each real file — sizes, hashes, differing
         # regions and strings for a binary, null otherwise — and "binary_functions",
         # the function-level diff when an engine ran on it.
-        "schema_version": 3,
+        # 4: added "binary_links" on each real file ({string: [sha]}) and "commits"
+        # on each function change, when a revision range could be matched to a binary.
+        "schema_version": 4,
         "generated_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "dir_a": dir_a,
         "dir_b": dir_b,
@@ -253,7 +257,7 @@ def build_json(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
 
 def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
                  commits=None, intent_shown=False, binary=None, functions=None,
-                 decompiled=None, max_functions=200):
+                 decompiled=None, max_functions=200, links=None):
     """Render the Markdown report."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -340,11 +344,12 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
             if detail is None:
                 out.append("Binary file — not analyzed, no diff shown.\n")
             else:
-                out.extend("- %s" % _md_inline(item) for item in _binary_facts(detail))
+                out.extend("- %s" % _md_inline(item)
+                           for item in _binary_facts(detail, (links or {}).get(rel), commits))
                 out.append("")
             found = (functions or {}).get(rel)
             if found is not None:
-                out.extend(_md_functions(found, max_functions, detail))
+                out.extend(_md_functions(found, max_functions, detail, (links or {}).get(rel)))
             if rel in analyses:
                 out.append(analyses[rel])
                 out.append("")
@@ -371,7 +376,7 @@ def build_report(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=N
 
 def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=None, risk=None,
                commits=None, intent_shown=False, binary=None, functions=None,
-               decompiled=None, max_functions=200):
+               decompiled=None, max_functions=200, links=None):
     """Render the report as one self-contained HTML file."""
     real, noise, skipped = comparison.real, comparison.noise, comparison.skipped
     _, dangling = _xref_parts(xref)
@@ -478,7 +483,8 @@ def build_html(dir_a, dir_b, comparison, analyses, summary, xref=None, brief=Non
         for rel in sorted(real):
             out.append(_change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label,
                                      (binary or {}).get(rel), (functions or {}).get(rel),
-                                     (decompiled or {}).get(rel), max_functions))
+                                     (decompiled or {}).get(rel), max_functions,
+                                     (links or {}).get(rel), commits))
         out.append("</div>")
     out.append("</section>")
 
@@ -501,7 +507,8 @@ def _file_row(rel, status, is_real=False):
 
 
 def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Risk",
-                  binary=None, functions=None, decompiled=None, max_functions=200):
+                  binary=None, functions=None, decompiled=None, max_functions=200,
+                  links=None, commits=None):
     status = _STATUS_LABELS.get(real[rel][0], real[rel][0])
     parts = ['<article class="change" id="file-%s">' % escape(rel)]
     heading = ["<h3><code>%s</code>" % escape(rel), '<span class="chip">%s</span>' % escape(status)]
@@ -514,9 +521,9 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
             parts.append('<p class="empty">Binary file — not analyzed, no diff shown.</p>')
         else:
             parts.append('<ul class="facts">%s</ul>' % "".join(
-                "<li>%s</li>" % _html_inline(item) for item in _binary_facts(binary)))
+                "<li>%s</li>" % _html_inline(item) for item in _binary_facts(binary, links, commits)))
             if functions is not None:
-                parts.append(_html_functions(functions, max_functions, binary))
+                parts.append(_html_functions(functions, max_functions, binary, links))
             if rel in analyses:
                 parts.append('<div class="prose">%s</div>' % _html_prose(analyses[rel]))
             if decompiled:
@@ -542,7 +549,7 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
 
 # A fact is a list of (text, is_code) runs, so Markdown and HTML each render the
 # code spans their own way from one source of wording.
-def _binary_facts(summary):
+def _binary_facts(summary, links=None, commits=None):
     """What layer 1 found about a binary that still differs, as facts."""
     kind = {"pe": "PE (Windows)", "elf": "ELF (Linux/Unix)"}.get(summary.format,
                                                                  "unrecognized format")
@@ -573,7 +580,25 @@ def _binary_facts(summary):
         facts.append(runs)
     if getattr(summary, "toolchain", None):
         facts.append([("Toolchain changed: %s" % "; ".join(summary.toolchain), False)])
+    if links is not None and links.strings:
+        subjects = dict((item.sha, item.subject) for item in (commits or []))
+        runs = [("Linked to commits: ", False)]
+        for index, (text, shas) in enumerate(sorted(links.strings.items())):
+            if index:
+                runs.append(("; ", False))
+            runs.append((text, True))
+            runs.append((" → " + ", ".join(_commit_label(sha, subjects) for sha in shas), False))
+        facts.append(runs)
     return facts
+
+
+def _commit_label(sha, subjects):
+    subject = subjects.get(sha)
+    return "%s (%s)" % (_short9(sha), subject) if subject else _short9(sha)
+
+
+def _short9(sha):
+    return sha[:9]
 
 
 def _size_change(size_a, size_b):
@@ -608,7 +633,7 @@ def _html_inline(runs):
                    for text, is_code in runs)
 
 
-def _function_rows(found, limit):
+def _function_rows(found, limit, links=None):
     """Disagreements first: a namedtuple of the rows and the true group sizes.
 
     Each row: (name, address, status, similarity, engines). A function the engines
@@ -635,6 +660,11 @@ def _function_rows(found, limit):
             engines = ", ".join(sorted(change.views))
         if _is_toolchain_name(change.name_a or change.name_b):
             engines += " (likely toolchain)"
+        linked = ((links.functions if links is not None else {})
+                  .get(change.name_a or change.name_b))
+        if linked:
+            engines += "; commit%s %s" % ("s" if len(linked) > 1 else "",
+                                         ", ".join(_short9(sha) for sha in linked))
         rows[0 if is_disputed else 1].append(
             (name, _address(change), change.status, similarity, engines))
     return _Rows(rows[0], rows[1], len(disputed), len(agreed),
@@ -710,13 +740,13 @@ def _no_function_note(summary):
             "could not be placed in code or data for this file.")
 
 
-def _md_functions(found, limit, summary=None):
+def _md_functions(found, limit, summary=None, links=None):
     out = ["**Function-level diff** (%s): %s." % (", ".join(found.engines),
                                                    _function_counts(found)), ""]
     if not found.changes:
         out.append(_no_function_note(summary) + "\n")
         return out
-    rows = _function_rows(found, limit)
+    rows = _function_rows(found, limit, links)
     with_address = any(row[1] for row in rows.disputed + rows.agreed)
     for title, group in (
             (_group_title("**Engines disagree — look here first**", len(rows.disputed),
@@ -748,13 +778,13 @@ def _md_functions(found, limit, summary=None):
     return out
 
 
-def _html_functions(found, limit, summary=None):
+def _html_functions(found, limit, summary=None, links=None):
     parts = ['<p class="fn-head"><strong>Function-level diff</strong> (%s): %s.</p>'
              % (escape(", ".join(found.engines)), escape(_function_counts(found)))]
     if not found.changes:
         parts.append('<p class="empty">%s</p>' % escape(_no_function_note(summary)))
         return "\n".join(parts)
-    rows = _function_rows(found, limit)
+    rows = _function_rows(found, limit, links)
     with_address = any(row[1] for row in rows.disputed + rows.agreed)
     for title, group, css in (
             (_group_title("Engines disagree — look here first", len(rows.disputed),
@@ -781,7 +811,7 @@ def _html_functions(found, limit, summary=None):
     return "\n".join(parts)
 
 
-def _functions_json(found):
+def _functions_json(found, links=None):
     if found is None:
         return None
     return {
@@ -797,10 +827,16 @@ def _functions_json(found):
                 "address_a": getattr(change, "address_a", None),
                 "address_b": getattr(change, "address_b", None),
                 "toolchain": _is_toolchain_name(change.name_a or change.name_b),
+                "commits": list(((links.functions if links is not None else {})
+                                 .get(change.name_a or change.name_b)) or []),
             }
             for change in found.changes
         ],
     }
+
+
+def _links_json(links):
+    return {text: list(shas) for text, shas in links.strings.items()} if links is not None else {}
 
 
 def _binary_json(summary):

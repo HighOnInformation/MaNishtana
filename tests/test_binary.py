@@ -396,7 +396,7 @@ class BinaryRendering(unittest.TestCase):
         detail = payload["real"][0]["binary_detail"]
         self.assertEqual(detail["format"], "pe")
         self.assertEqual(detail["strings_added"], ["new_marker_text"])
-        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["schema_version"], 4)
 
     def test_without_detail_the_old_note_remains(self):
         md = build_report("v1", "v2", self.comparison, {}, None)

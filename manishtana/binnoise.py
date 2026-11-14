@@ -88,6 +88,20 @@ def _toolchain_changes(tool_a, tool_b):
     return lines
 
 
+_RUSTC_PATH_RE = re.compile(rb"/rustc/([0-9a-f]{40})/")
+
+
+def _rustc_commit_change(data_a, data_b):
+    """Rust embeds '/rustc/<commit>/library/...' in its panic locations, inside packed
+    literals, so a different compiler shows up only as scattered string noise."""
+    def commits(data):
+        return set(m.decode("ascii")[:12] for m in _RUSTC_PATH_RE.findall(data or b""))
+    old, new = commits(data_a), commits(data_b)
+    if not old or not new or old == new:
+        return []
+    return ["rustc commit: %s -> %s" % (", ".join(sorted(old)), ", ".join(sorted(new)))]
+
+
 _BLOCK = 4096
 _MAX_REGIONS = 5
 _MAX_STRINGS = 20
@@ -195,7 +209,7 @@ def summarize(path_a, path_b, ignore_strings=None):
         strings_added_total=len(added),
         strings_removed_total=len(removed),
         code_regions=code_regions,
-        toolchain=_toolchain_changes(tool_a, tool_b),
+        toolchain=_toolchain_changes(tool_a, tool_b) + _rustc_commit_change(data_a, data_b),
     )
 
 
