@@ -900,3 +900,32 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
 - **Tests:** full `python -m unittest discover -s tests` run, 372 pass (364 before; 8 new).
 - **Open:** the 2000-string budget and 4096 cap are untuned guesses; no large real pair was timed
   against them in this pass.
+
+### Round 8 (2026-11-14, third pass): nostd/src/io, review of the bounded search
+
+- **Fixed (test-first):**
+  1. `nostd/src/io/...` was still cut at its `std/src/io/` tail. The bare-std rule now needs `std` to
+     start a path segment, unless the pair also carries the real `library/std/src/` form (then a std
+     path glued straight after a word, as in the ripgrep rebuild's `stdinstd/src/sync/once.rs`, is still
+     noise). Trade-off: such a glued path in a binary with no `library/std/src/` anywhere is now shown,
+     and a no_std project path is cut if the other side was built with the real std; both are rare.
+  2. Review of a88d4fc, bug A: in `_removed_chunk` an oversized (over 4096) first literal ended the
+     search, so a later literal that was the real match was never reached (deletion hidden as layout).
+     It now skips to the next literal.
+  3. Review, bug B (found by timing): the search read the other side's strings joined in set order, and
+     it only tries 20 matches, so the deletions list and `layout_noise` changed from run to run
+     (zstd v1/v2: 3 to 6 deletions, layout 261 to 264). The strings are now joined sorted; five runs on
+     zstd and three on ripgrep give identical numbers.
+- **Review notes, not changed:** strings past the 2000-check budget or in a huge literal are counted as
+  layout, so a real deletion there is hidden but counted; the budget is spent on the B side first, so the
+  A-side insertions are the ones skipped when it runs out; 20 tries can miss a literal when more than 20
+  literals share the first 8 characters.
+- **Real-binary timing (byte level, `--no-llm`, via `summarize`):** ripgrep alpine 3.21 vs 3.22 0.7-1.0 s
+  (66/69 strings, 277 layout, 18 deletions); fd 10.4.1 -> 10.4.2 0.7-0.9 s (4/3, 0 deletions); zstd.exe
+  1.5.6 -> 1.5.7 0.45 s (136/134, 262 layout, 5 deletions). Limits are not reached on these (largest
+  string table well under the 6 MB window limit); identical timing to the a88d4fc base within noise.
+  Reports in `Documents\manish-binary-rounds\s18\`.
+- **Same-toolchain rebuild control:** none available. Release assets are one build per tag; a rebuild
+  needs a second packager (Alpine, Debian), which changes rustc or libc, so it is not a same-toolchain
+  control. Skipped, nothing downloaded.
+- **Tests:** 377 pass (372 before; 5 new).
