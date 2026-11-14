@@ -848,3 +848,34 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
 - **Tests:** 345 pass (336 before; new ones in `tests/test_binary_toolchain.py`, one existing ranking
   test updated because code lookalikes are now counted). No independent review run.
   Raw reports in `Documents\manish-binary-rounds\s16\`.
+
+### Round 8 (2026-11-14): fixes to the round-7 noise filter's open findings
+
+- **Findings fixed (test-first, `tests/test_binary_toolchain.py`):**
+  1. A changed end word of 3-7 letters that also appears on the other side was dropped as a join.
+     The edge literal must now also sit where a literal ends (tail) or starts (head) on the other
+     side (`_at_literal_edge`); `...files and dirs` -> `...files and links` is reported.
+  2. `ERROR: ` -> `FATAL: ` was lost: 7-character labels never reached the string list and padded
+     labels (`WARNING:   `) were treated as code. Labels `[A-Z]{3,}:` with optional blanks are now
+     kept, including the short NUL-delimited form.
+  3. Any `core/src/` path was compiler noise. Now only `library/{core,std,alloc}/src/`,
+     `rustlib/.../library/`, and a bare `std/src/` or `alloc/src/` (needed for glued packed
+     literals) are toolchain; a bare `core/src/...` stays as the project's own path.
+  4. Pure deletions (and insertions) were dropped by the window test. They are now listed apart,
+     labelled "pure deletion or insertion, the rest unchanged", as `text (removed: piece)` or
+     `(inserted: piece)`; `BinarySummary.deletions`, JSON `binary_detail.deletions`. The piece must
+     contain a 3-letter word and not exist elsewhere in the same build (else it is a moved literal).
+  5. README describes the noise filter and its counting.
+- **Tests:** 363 pass (`python -m unittest discover -s tests`); 10 new.
+- **Regression (bytes, `--no-llm`, previously downloaded pairs; reports in `Documents\manish-binary-rounds\s17\`),
+  new vs the c605528 base:**
+  - ripgrep rebuild: strings 66/59 -> 66/67, 20 labelled deletions, layout 299 -> 276. The +8 removed
+    are bare `core/src/...` paths (finding 3, expected).
+  - ripgrep alpine vs distro build: 195/683 -> 202/698, 43 deletions.
+  - zstd 1.5.6 -> 1.5.7 (both files): unchanged (87/50 and 136/134); version strings still kept.
+  - fd 10.4.1 -> 10.4.2: 4/3, identical to the c605528 base (the 3/2 of round 7 predates the
+    false-negative fix); same-binary pair: no differences.
+- **Not done:** no same-toolchain rebuild control pair (not available without a new download).
+  Many labelled deletions in cross-distro pairs are real text differences between libc/std
+  versions; the label does not say the change is source-level.
+- No independent review run (self-review only).

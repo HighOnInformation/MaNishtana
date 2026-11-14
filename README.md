@@ -369,6 +369,29 @@ normalized bytes, so a time stamp is not one of them; differences within 4 KB of
 each other are one region) and the printable strings of 8+ characters added and
 removed — often the quickest clue to what changed.
 
+**String noise filter.** A rebuild changes many strings that are not changes, so
+the string lists are filtered before they are shown. Dropped strings are never hidden
+silently: they are counted in one line, "N strings differ only in literal layout or look
+like code bytes (not listed)" (JSON: `binary_detail.layout_noise`). What is dropped:
+
+- *Compiler-library paths.* Rust packs each literal together with its source path. A
+  path inside the rust library (`/rustc/<hash>/library/...`, `rustlib/.../library/...`,
+  `library/{core,std,alloc}/src/...`, a bare `std/src/` or `alloc/src/`), a cargo registry,
+  `/rust/deps/` or `/usr/src/rustc-*` is cut out of the literal. Your own `crates/...rs`
+  and `src/...rs` stay, and so does a bare `core/src/...` (it may be your own crate).
+- *Re-layout.* A string that only differs from the other side because its neighbouring
+  literals changed: every letter and digit lies inside an 8-character window that exists on
+  the other build. A changed word, a number or a version is not dropped; a changed end word
+  is kept unless the other build has the same text ending (or starting) its own literal.
+- *Code bytes.* Short strings (up to 12 characters) with no 3-letter word, no `%` and no
+  version or escape shape. Upper-case names (`NO_COLOR`) and labels (`ERROR:`) are kept.
+
+*Pure deletions and insertions.* A string that equals a literal on the other side with
+one piece cut out (and that piece is not elsewhere in the same build) looks like re-layout
+to the window test, so it is listed apart: "Strings with a pure deletion or insertion, the
+rest unchanged", each shown as `text (removed: piece)` or `text (inserted: piece)`
+(JSON: `binary_detail.deletions`). They are not counted as noise.
+
 **Linking to commits.** Under `--git`, or with two directories plus
 `--link-repo REPO --from REV [--to REV]`, a string added or removed in a binary, and a
 changed function whose decompiled code quotes a string literal (a stripped binary has

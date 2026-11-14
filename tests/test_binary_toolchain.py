@@ -195,6 +195,20 @@ class RebuildLayoutNoise(unittest.TestCase):
         self.assertIn("crates/core/flags/new_file.rs", s.strings_added[0])
 
 
+    def test_a_core_dir_outside_crates_is_the_projects_own_path(self):
+        old = b"\x00core/src/engine.rsone message here\x00"
+        new = b"\x00core/src/engine.rsone message here core/src/extra.rs\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.strings_added_total, 1)
+        self.assertIn("core/src/extra.rs", s.strings_added[0])
+
+    def test_rustlib_library_paths_are_toolchain(self):
+        old = b"\x00/usr/lib/rustlib/src/rust/library/core/src/cell.rsmid > len\x00"
+        new = b"\x00/usr/lib/rustlib/src/rust/library/core/src/slice.rsmid > len\x00"
+        s = self._sum(old, new)
+        self.assertEqual((s.strings_added_total, s.strings_removed_total), (0, 0))
+
+
 class RebuildLiteralRelayout(unittest.TestCase):
     """The same literals re-glued next to different neighbours (real strings from the
     ripgrep 14.1.1 alpine 3.21 / 3.22 rebuild), compiled-code bytes that look like text,
@@ -285,9 +299,61 @@ class RelayoutFalseNegatives(unittest.TestCase):
         s = self._sum(old, new)
         self.assertEqual(s.strings_added, [])
 
+    LONG = b"the quick brown fox jumps over the lazy sleeping dog today"
+    SHORT = b"the quick brown fox jumps over the lazy dog today"
+
+    def test_a_pure_deletion_is_reported_and_labelled(self):
+        s = self._sum(b"\x00" + self.F + self.LONG + b"\x00", b"\x00" + self.F + self.SHORT + b"\x00")
+        self.assertEqual(s.strings_added, [])
+        self.assertEqual(len(s.deletions), 1)
+        self.assertIn("the quick brown fox jumps over the lazy dog today", s.deletions[0])
+        self.assertIn("removed: sleeping", s.deletions[0])
+
+    def test_a_pure_insertion_is_reported_and_labelled(self):
+        s = self._sum(b"\x00" + self.F + self.SHORT + b"\x00", b"\x00" + self.F + self.LONG + b"\x00")
+        self.assertEqual(len(s.deletions), 1)
+        self.assertIn("inserted: sleeping", s.deletions[0])
+
+    def test_a_moved_literal_is_layout_not_a_deletion(self):
+        # "sleeping dog today" moved to its own literal: nothing was deleted
+        old = b"\x00" + self.F + self.LONG + b"\x00"
+        new = b"\x00" + self.F + self.SHORT + b"\x00sleeping\x00"
+        s = self._sum(old, new)
+        self.assertEqual(s.deletions, [])
+
+    def test_deletions_are_shown_in_the_report(self):
+        from manishtana.output import _binary_facts
+        s = self._sum(b"\x00" + self.F + self.LONG + b"\x00", b"\x00" + self.F + self.SHORT + b"\x00")
+        text = " ".join(t for fact in _binary_facts(s) for t, _ in fact)
+        self.assertIn("pure deletion", text)
+        self.assertIn("removed: sleeping", text)
+
     def test_an_environment_variable_name_is_not_code(self):
         added, _ = self._changed(b"", b"\x00RG_DEBUG_LOG\x00NO_COLOR\x00")
         self.assertEqual(sorted(added), ["NO_COLOR", "RG_DEBUG_LOG"])
+
+    def test_error_to_fatal_label_change_is_reported(self):
+        added, removed = self._changed(b"\x00ERROR: \x00", b"\x00FATAL: \x00")
+        self.assertEqual((added, removed), (["FATAL: "], ["ERROR: "]))
+
+    def test_a_padded_label_is_not_code(self):
+        added, _ = self._changed(b"", b"\x00WARNING:   \x00")
+        self.assertEqual(added, ["WARNING:   "])
+
+    def test_a_changed_end_word_that_exists_elsewhere_is_reported(self):
+        # "links" appears in another literal on the other side, but "...files and dirs" was one
+        # literal there, so "...files and links" is an edit, not a re-gluing
+        old = b"\x00search hidden files and dirs\x00show all links\x00"
+        new = b"\x00search hidden files and links\x00show all links\x00"
+        added, removed = self._changed(old, new)
+        self.assertEqual(added, ["search hidden files and links"])
+        self.assertEqual(removed, ["search hidden files and dirs"])
+
+    def test_a_changed_start_word_that_exists_elsewhere_is_reported(self):
+        old = b"\x00Disable the frobnicator option\x00please Enable it now\x00"
+        new = b"\x00Enable the frobnicator option\x00please Enable it now\x00"
+        added, _ = self._changed(old, new)
+        self.assertEqual(added, ["Enable the frobnicator option"])
 
     def test_an_upper_case_label_is_not_code(self):
         added, _ = self._changed(b"", b"\x00WARNING:\x00")

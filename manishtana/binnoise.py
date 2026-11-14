@@ -39,8 +39,8 @@ BinarySummary = collections.namedtuple(
     "BinarySummary",
     "format size_a size_b sha_a sha_b regions regions_total strings_added "
     "strings_removed strings_added_total strings_removed_total code_regions toolchain dependencies revisions "
-    "layout_noise",
-    defaults=(None, None, None, None, 0),
+    "layout_noise deletions",
+    defaults=(None, None, None, None, 0, ()),
 )
 
 # Round 1 finding 2: the compiler or runtime that built a binary leaves its name in
@@ -172,6 +172,7 @@ _STRING_RE = re.compile(rb"[\x20-\x7e]{8,}")
 # which instruction bytes spelling "1.2.3" by chance rarely do. Go and Rust pack
 # their strings without NULs; there a short version sits in a longer run instead.
 _SHORT_RE = re.compile(rb"(?<![\x01-\xff])(\x1b?[\x20-\x7e]{3,7})\x00")
+_LABEL_RE = re.compile(rb"[A-Z]{3,}:[ ]*\Z")   # "ERROR: ", "FATAL: ": a label a release may change
 _VERSION_RE = re.compile(rb"v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.]+)?\Z")
 _ESCAPE_RE = re.compile(rb"\x1b\[[0-9;]*[A-Za-z]\Z")
 # Long near-copies (see _excerpt_pairs): strings over _EXCERPT_OVER characters
@@ -251,7 +252,7 @@ def summarize(path_a, path_b, ignore_strings=None):
     tool_a = {text for text in strings_a if _toolchain_of(text)}
     tool_b = {text for text in strings_b if _toolchain_of(text)}
     strings_a, strings_b = strings_a - tool_a, strings_b - tool_b
-    new_b, new_a, layout = _drop_layout_noise(strings_b - strings_a, strings_a - strings_b,
+    new_b, new_a, layout, deletions = _drop_layout_noise(strings_b - strings_a, strings_a - strings_b,
                                               strings_a, strings_b)
     added, removed = _excerpt_pairs(_ranked(new_b), _ranked(new_a))
 
@@ -272,6 +273,7 @@ def summarize(path_a, path_b, ignore_strings=None):
         dependencies=_dependency_changes(data_a, data_b),
         revisions=_build_revisions(data_a, data_b),
         layout_noise=layout,
+        deletions=sorted(deletions),
     )
 
 
@@ -788,7 +790,9 @@ def _mask_build_hashes(data):
 # because the next literal is glued right after it.
 _TOOLCHAIN_PATH_RE = (
     r"(?:(?:/[\w<>.+-]+)*?/registry/src/[\w<>.+-]+/|/rustc/<hash>/|/rust/deps/|"
-    r"/usr/src/rustc-[\d.]+/|(?:library/)?(?=(?:core|std|alloc)/src/))[\w<>.+/-]*?\.rs")
+    r"/usr/src/rustc-[\d.]+/|(?:/[\w.+-]+)*?/rustlib/(?:[\w.+-]+/)*?library/|"
+    r"library/(?=(?:core|std|alloc)/src/)|(?=(?:std|alloc)/src/))"
+    r"[\w<>.+/-]*?\.rs")
 _OWN_PATH_RE = r"(?:crates/|(?<![\w/.+-])src/)[\w.+-]+(?:/[\w.+-]+)*?\.rs"
 _PATH_SPLIT_RE = re.compile("(%s)|(%s)" % (_TOOLCHAIN_PATH_RE, _OWN_PATH_RE))
 _PIECE_MIN = 8
@@ -821,7 +825,7 @@ def _strings(data):
         found.update(_pieces(match.decode("ascii")))
     for match in _SHORT_RE.finditer(data):
         text = match.group(1)
-        if _ESCAPE_RE.match(text) or _VERSION_RE.match(text):
+        if _ESCAPE_RE.match(text) or _VERSION_RE.match(text) or _LABEL_RE.match(text):
             found.add(text.decode("ascii").replace("\x1b", "\\x1b"))
     return found
 
@@ -840,7 +844,7 @@ _WORD_RE = re.compile(r"[a-z]{3}|[A-Z][a-z]{2}")
 # An upper-case name ("NO_COLOR", "RG_DEBUG_LOG") or label ("WARNING:") has no
 # lower-case word but is text a release adds; instruction bytes ("AWAVAUAT", "H;l$`u!H")
 # have neither an underscore between upper-case runs nor a trailing colon.
-_UPPER_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\Z|[A-Z]{3,}:\Z")
+_UPPER_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\Z|[A-Z]{3,}:[ ]*\Z")
 
 
 def _is_code_like(text):
@@ -892,24 +896,106 @@ def _is_relaid(text, other_windows, other_text):
             return False
     if first > _EDGE_WORD or len(text) - 1 - last > _EDGE_WORD:
         return False
-    for fragment in (text[:first], text[last + 1:]):
+    for fragment, body, tail in ((text[:first], text[first:first + _WINDOW], False),
+                                 (text[last + 1:], text[last + 1 - _WINDOW:last + 1], True)):
         letters = sum(1 for char in fragment if char.isalnum())
-        if letters and (letters < 3 or fragment.strip() not in other_text):
+        if not letters:
+            continue
+        if letters < 3 or fragment.strip() not in other_text:
+            return False
+        if not _at_literal_edge(body, other_text, tail):
             return False
     return True
 
 
+def _at_literal_edge(window, other_text, tail):
+    """True if `window` sits at the end (tail) or start of a literal on the other side.
+
+    A glued literal is a join: the seen text ends (or begins) where the other build's
+    literal ends (or begins). If the seen text continues there with other characters,
+    the literal was one string and its end word changed.
+    """
+    probe = window.rstrip() if tail else window.lstrip()
+    if not probe:
+        return True
+    at = other_text.find(probe)
+    while at >= 0:
+        if tail:
+            i = at + len(probe)
+            while i < len(other_text) and other_text[i] == " ":
+                i += 1
+            if i >= len(other_text) or other_text[i] == "\x00":
+                return True
+        else:
+            i = at - 1
+            while i >= 0 and other_text[i] == " ":
+                i -= 1
+            if i < 0 or other_text[i] == "\x00":
+                return True
+        at = other_text.find(probe, at + 1)
+    return False
+
+
+_DELETION_TRIES = 20
+
+
+def _removed_chunk(text, other_text, own_text):
+    """The piece `other_text` has and `text` lacks, if `text` is one of its literals with
+    a single contiguous piece cut out and that piece exists nowhere on text's own side.
+
+    Such a string is covered by the other side's windows just as a re-glued literal is,
+    but nothing moved: text was removed (or, seen from the other side, inserted). A
+    chunk that still exists elsewhere on the string's own side was only moved.
+    """
+    at = other_text.find(text[:_WINDOW])
+    for _ in range(_DELETION_TRIES):
+        if at < 0:
+            return None
+        start = other_text.rfind("\x00", 0, at) + 1
+        stop = other_text.find("\x00", at)
+        literal = other_text[start:len(other_text) if stop < 0 else stop]
+        if len(literal) > len(text):
+            k = 0
+            while k < len(text) and text[k] == literal[k]:
+                k += 1
+            if literal.endswith(text[k:]):
+                chunk = literal[k:len(literal) - (len(text) - k)]
+                if (_WORD_RE.search(chunk)   # a removed word, not stray code bytes
+                        and chunk.strip() not in own_text):
+                    return chunk.strip()
+                return None
+        at = other_text.find(text[:_WINDOW], at + 1)
+    return None
+
+
 def _drop_layout_noise(new_b, new_a, all_a, all_b):
-    """(added, removed, how many were dropped) from the strings only one side has."""
+    """(added, removed, how many were dropped, deletions) from the strings only one side has.
+
+    `deletions` are strings that differ from a literal on the other side only by a
+    removed or inserted piece; they are reported, labelled, not dropped.
+    """
     dropped = 0
+    deletions = []
     code_b = {t for t in new_b if _is_code_like(t)}
     code_a = {t for t in new_a if _is_code_like(t)}
     new_b, new_a, dropped = new_b - code_b, new_a - code_a, len(code_b) + len(code_a)
     if sum(map(len, all_a)) + sum(map(len, all_b)) <= _WINDOW_LIMIT:
         win_a, win_b = _windows(all_a), _windows(all_b)
         text_a, text_b = "\x00".join(all_a), "\x00".join(all_b)
-        keep_b = {t for t in new_b if len(t) < _WINDOW or not _is_relaid(t, win_a, text_a)}
-        keep_a = {t for t in new_a if len(t) < _WINDOW or not _is_relaid(t, win_b, text_b)}
-        dropped += (len(new_b) - len(keep_b)) + (len(new_a) - len(keep_a))
+
+        def keep(strings, windows, other_text, own_text, verb):
+            kept = set()
+            for t in strings:
+                if len(t) < _WINDOW or not _is_relaid(t, windows, other_text):
+                    kept.add(t)
+                    continue
+                chunk = _removed_chunk(t, other_text, own_text)
+                if chunk is not None:
+                    deletions.append("%s (%s: %s)" % (t, verb, chunk))
+            return kept
+
+        keep_b = keep(new_b, win_a, text_a, text_b, "removed")
+        keep_a = keep(new_a, win_b, text_b, text_a, "inserted")
+        dropped += (len(new_b) - len(keep_b)) + (len(new_a) - len(keep_a)) - len(deletions)
         new_b, new_a = keep_b, keep_a
-    return new_b, new_a, dropped
+    return new_b, new_a, dropped, deletions

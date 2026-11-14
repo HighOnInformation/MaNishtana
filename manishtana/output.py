@@ -547,6 +547,9 @@ def _change_block(rel, comparison, analyses, real, dir_a, dir_b, file_label="Ris
     return "\n".join(parts) + "\n</article>"
 
 
+_STRING_FACTS = 20   # deletions listed per binary
+
+
 # A fact is a list of (text, is_code) runs, so Markdown and HTML each render the
 # code spans their own way from one source of wording.
 def _binary_facts(summary, links=None, commits=None):
@@ -577,6 +580,16 @@ def _binary_facts(summary, links=None, commits=None):
             runs.append((item, True))
         if total > len(items):
             runs.append((", …", False))
+        facts.append(runs)
+    if getattr(summary, "deletions", None):
+        runs = [("Strings with a pure deletion or insertion, the rest unchanged (%d): "
+                 % len(summary.deletions), False)]
+        for index, item in enumerate(summary.deletions[:_STRING_FACTS]):
+            if index:
+                runs.append(("; ", False))
+            runs.append((item, True))
+        if len(summary.deletions) > _STRING_FACTS:
+            runs.append(("; …", False))
         facts.append(runs)
     if getattr(summary, "layout_noise", 0):
         facts.append([("%d strings differ only in literal layout or look like code bytes "
