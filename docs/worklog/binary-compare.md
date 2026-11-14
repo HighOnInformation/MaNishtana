@@ -752,3 +752,33 @@ Ground truth: 6 commits; one code change (`src/walk.rs`, a syscall skipped for
   moved by a few between runs of the same pair, so ghidriff's matching of a stripped
   Rust binary is not fully stable. No "likely toolchain" label fires on fd (all
   `FUN_…`), and the decompiled section has no doubled blank lines. Round 2 bytes: 1 s.
+
+### Round 5 (2026-11-14): finding 3 (links to commits), dependency versions, reproducible pair
+
+- **Same-version pair (noise only).** fd 10.4.2: the GitHub release tarball and the
+  Debian `.deb` published with it hold byte-identical `fd` binaries (gnu, and likewise
+  musl; SHA-256 equal). Manish reports "no differences", 0 real, 0 noise. Limitation:
+  this is the trivial case. No independent rebuild of the same version with different
+  toolchain bits was available as a release asset, so how Manish treats a true rebuild
+  is not measured. Closest: ripgrep 14.1.1 from Alpine 3.21 vs 3.22 (same upstream
+  version, rebuilt with rustc `f6e511ee` -> `05f9846f`): 1 file, the rustc change is
+  now one "Toolchain changed" line, but ~200 packed Rust literals still appear as
+  strings added/removed (cargo registry hashes `index.crates.io-<hash>`, std paths).
+  Not fixed; a next step is to normalise those registry hash segments before the
+  string comparison.
+- **Finding 3, done in slices (earlier commits on this branch, now documented):**
+  literal strings on changed lines of a commit's patch link a string or function to
+  the commit; a version inside a packed Rust/Go literal links to the bump commit;
+  a quoted source file name (`src/walk.rs`) links to commits touching that file, as
+  weaker evidence listed after literal matches. Review fix this round: paths into the
+  compiler's library or a dependency (`/rustc/<hash>/library/...`, `/usr/src/rustc-*`,
+  `registry/`, `.cargo/`, `/rust/deps/`) are never matched, since `lib.rs` or `mod.rs`
+  there is not the project's. End to end on fd 10.4.1 -> 10.4.2 with `--link-repo`
+  (1 s, bytes only): the version strings link to `bf6489a79 chore: Bump to 10.4.2`.
+  Still unlinked: the `walk.rs` syscall change (no literal, and the stripped binary
+  quotes no `walk.rs` path in the changed functions), so the report cannot name it.
+- **Dependencies and toolchain:** Rust crate versions (cargo registry or Debian
+  vendored paths) and Go module versions are reported as "Dependencies changed", the
+  Go `vcs.revision` as "Built from git revision", Debian `/usr/src/rustc-X/` as a
+  rustc version, flag-only GCC changes as a toolchain change.
+- **Tests:** 334 pass (`python -m unittest discover -s tests`).

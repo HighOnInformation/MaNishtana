@@ -6,7 +6,7 @@ Public interface:
     link(commits, patches, strings, changes) -> Links
     literals(pseudo_diff) -> [str]   string literals on the changed lines of a diff
     pieces(text) -> [str]            the matchable parts of an excerpted string
-    paths(text) -> [str]             source file names quoted in a text
+    paths(text) -> [str]             the project's source file names quoted in a text
     changed_files(patch) -> [str]    files one commit's patch touches
     MAX_LINKS                      most commits named per finding
 
@@ -45,6 +45,10 @@ _VERSION_RE = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?!\d|\.\d)")
 _PATH_RE = re.compile(
     r"[A-Za-z0-9_./\-]+\.(?:rs|c|h|cc|cpp|cxx|hpp|go|py|java|cs|zig)(?![A-Za-z0-9_])")
 _FILE_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
+# Paths into the compiler's own library or a dependency's sources: never the project's.
+_EXTERNAL_RE = re.compile(
+    r"(?:^|/)(?:rustc[-/]|rust/deps/|\.cargo/|registry/|vendor/|library/(?:core|std|alloc)/)"
+    r"|^/usr/(?:src|share|lib)/")
 _FUN_RE = re.compile(r"^(FUN|SUB|LAB|DAT|sub|loc)_[0-9A-Fa-f]+$")
 
 
@@ -77,6 +81,8 @@ def paths(text):
     found = []
     for path in _PATH_RE.findall(text or ""):
         path = path.replace("\\", "/")
+        if _EXTERNAL_RE.search(path):
+            continue
         while path.startswith("./"):
             path = path[2:]
         if path and path not in found:

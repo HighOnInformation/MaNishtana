@@ -30,6 +30,30 @@ def change(name, pseudo):
     return FunctionChange(name, name, "modified", 0.9, {}, pseudo)
 
 
+LIB = ("diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n"
+       "@@ -1 +1 @@\n-    let c = 1;\n+    let c = 2;\n")
+
+
+class ExternalPaths(unittest.TestCase):
+    """A std-library or registry file shares a name with the project's own (lib.rs)."""
+
+    def link_one(self, text):
+        commits = [Commit("c" * 40, "x", "d", "Touch lib", "")]
+        return binlink.link(commits, {"c" * 40: LIB}, [text], []).strings
+
+    def test_rust_std_and_registry_paths_do_not_link(self):
+        for text in ("/rustc/f6e511eec7342f59a25f7c0534f1dbea00d01b14/library/core/src/lib.rs",
+                     "/usr/src/rustc-1.85.0/library/std/src/lib.rs",
+                     "/usr/share/cargo/registry/regex-0.1.0/src/lib.rs",
+                     "/home/b/.cargo/registry/src/index.crates.io-6f17/regex-1.0.0/src/lib.rs",
+                     "/rust/deps/gimli-0.29.0/src/lib.rs"):
+            self.assertEqual(self.link_one("panicked at " + text), {}, text)
+
+    def test_own_path_still_links(self):
+        self.assertEqual(self.link_one("panicked at src/lib.rs:5"),
+                         {"panicked at src/lib.rs:5": ["c" * 40]})
+
+
 class SourcePaths(unittest.TestCase):
     def test_paths_are_found_in_text(self):
         self.assertEqual(binlink.paths('panic at "src/walk.rs:120:9" and lib.c'),
@@ -48,8 +72,8 @@ class FileLinks(unittest.TestCase):
         links = binlink.link(COMMITS, PATCHES, [], [found])
         self.assertEqual(links.functions, {"FUN_00401000": ["a" * 40]})
 
-    def test_registry_prefix_in_the_binary_still_matches_by_suffix(self):
-        text = "/rustc/abc/library/src/walk.rs"
+    def test_build_prefix_in_the_binary_still_matches_by_suffix(self):
+        text = "/home/buildozer/aports/fd-10.4.2/src/walk.rs"
         links = binlink.link(COMMITS, PATCHES, [text], [])
         self.assertEqual(links.strings, {text: ["a" * 40]})
 
